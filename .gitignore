@@ -1,0 +1,6 @@
+__pychache__/
+*.pyc
+.env
+logs/
+old/
+*.code-workspace
