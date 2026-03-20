@@ -1,6 +1,10 @@
-__pychache__/
+__pycache__/
 *.pyc
 .env
 logs/
 old/
 *.code-workspace
+.venv/
+dist/
+*.egg-info/
+build/pyinstaller/

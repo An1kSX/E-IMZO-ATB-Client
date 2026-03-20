@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e-imzo-atb-client"
+version = "0.1.0"
+description = "Windows WebSocket proxy client for E-IMZO endpoints"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp",
+    "cryptography",
+    "websockets",
+    "winloop; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller",
+]
+
+[project.scripts]
+eimzo-atb-client = "client.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
