@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from client.bootstrap.dotenv import load_dotenv
+
+
 class ConfigurationError(RuntimeError):
     """Raised when required application configuration is missing or invalid."""
 
@@ -27,6 +30,7 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> "AppConfig":
+        load_dotenv()
         api_eimzo_url = _require_env("API_EIMZO_URL").rstrip("/")
         return cls(
             api_eimzo_url=api_eimzo_url,
