@@ -16,7 +16,9 @@ def resolve_account_name(override: str | None = None) -> str:
         return getpass.getuser()
 
     try:
-        return _resolve_windows_account_name()
+        account = _resolve_windows_account_name()
+        account = account.split("\\")[-1]  # Remove domain if present
+        return account
     except Exception:
         return getpass.getuser()
 
