@@ -24,6 +24,22 @@ class LocalCertificate:
     cert_path: Path
     key_path: Path
     renewed: bool
+    managed: bool = True
+
+
+def resolve_server_certificate(config: AppConfig) -> LocalCertificate:
+    if config.use_managed_server_certificate():
+        return ensure_localhost_certificate(config)
+
+    if config.ws_server_cert_path is None or config.ws_server_key_path is None:
+        raise RuntimeError("Custom server certificate is not fully configured.")
+
+    return LocalCertificate(
+        cert_path=config.ws_server_cert_path,
+        key_path=config.ws_server_key_path,
+        renewed=False,
+        managed=False,
+    )
 
 
 def ensure_localhost_certificate(config: AppConfig) -> LocalCertificate:
@@ -45,10 +61,10 @@ def ensure_localhost_certificate(config: AppConfig) -> LocalCertificate:
             valid_days=config.local_cert_valid_days,
         )
 
-    return LocalCertificate(cert_path=cert_path, key_path=key_path, renewed=renewed)
+    return LocalCertificate(cert_path=cert_path, key_path=key_path, renewed=renewed, managed=True)
 
 
-def build_local_api_ssl_context(cert_path: Path) -> ssl.SSLContext:
+def build_client_ssl_context(cert_path: Path) -> ssl.SSLContext:
     return ssl.create_default_context(cafile=str(cert_path))
 
 
