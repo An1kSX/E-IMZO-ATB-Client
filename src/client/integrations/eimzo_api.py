@@ -62,7 +62,7 @@ class EimzoApiClient:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
         headers: dict[str, str] = {}
         if self._send_account_header:
-            headers["x_account_name"] = self._account_name
+            headers["x-account-name"] = self._account_name
 
         request_kwargs: dict[str, Any] = {"headers": headers}
         if self._api_ca_cert_path is not None:
@@ -83,11 +83,40 @@ class EimzoApiClient:
                 method,
                 endpoint_url,
             )
+            if response.status >= 400:
+                LOGGER.warning(
+                    "API error response body for %s %s: %s",
+                    method,
+                    endpoint_url,
+                    _format_body_for_log(body=body, charset=response.charset),
+                )
             return ProxyResponse(
                 body=body,
                 content_type=response.content_type,
                 charset=response.charset,
             )
 
-    def _build_endpoint_url(self, plugin: str, name: str) -> str:
-        return f"{self._api_base_url}{self._api_path_prefix}/{plugin}/{name}"
+    def _build_endpoint_url(self, plugin: str | None, name: str) -> str:
+        segments = [self._api_base_url]
+        if self._api_path_prefix:
+            segments.append(self._api_path_prefix.strip("/"))
+        if plugin:
+            segments.append(str(plugin).strip("/"))
+        segments.append(str(name).strip("/"))
+        return "/".join(segment for segment in segments if segment)
+
+
+def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
+    if not body:
+        return "<empty>"
+
+    encoding = charset or "utf-8"
+    try:
+        text = body.decode(encoding)
+    except UnicodeDecodeError:
+        text = body.decode("utf-8", errors="replace")
+
+    text = " ".join(text.split())
+    if len(text) > 1000:
+        return f"{text[:1000]}..."
+    return text
