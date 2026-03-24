@@ -20,6 +20,7 @@ class AppConfig:
     ws_path: str
     ws_server_cert_path: Path | None
     ws_server_key_path: Path | None
+    local_cert_install_to_windows_root_store: bool
     server_retry_delay_seconds: float
     ws_ping_interval_seconds: float
     ws_ping_timeout_seconds: float
@@ -42,6 +43,10 @@ class AppConfig:
             ws_path=_normalize_ws_path(os.getenv("WS_SERVER_PATH", "/")),
             ws_server_cert_path=_read_optional_path("WS_SERVER_CERT_PATH"),
             ws_server_key_path=_read_optional_path("WS_SERVER_KEY_PATH"),
+            local_cert_install_to_windows_root_store=_read_bool(
+                "LOCAL_CERT_INSTALL_TO_WINDOWS_ROOT_STORE",
+                default=True,
+            ),
             server_retry_delay_seconds=_read_float("WS_SERVER_RETRY_DELAY_SECONDS", default=5.0),
             ws_ping_interval_seconds=_read_float("WS_PING_INTERVAL_SECONDS", default=20.0),
             ws_ping_timeout_seconds=_read_float("WS_PING_TIMEOUT_SECONDS", default=20.0),
@@ -123,6 +128,20 @@ def _read_int(name: str, *, default: int) -> int:
         return int(value)
     except ValueError as error:
         raise ConfigurationError(f"{name} must be an integer, got {value!r}.") from error
+
+
+def _read_bool(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    raise ConfigurationError(f"{name} must be a boolean, got {value!r}.")
 
 
 def _normalize_ws_path(value: str) -> str:

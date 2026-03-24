@@ -38,6 +38,8 @@ async def run_app(config: AppConfig) -> None:
 
     if config.api_eimzo_ca_cert_path is not None:
         LOGGER.info("Using configured CA certificate for E-IMZO API: %s", config.api_eimzo_ca_cert_path)
+    if server_certificate.managed and server_certificate.ca_cert_path is not None:
+        LOGGER.info("Using managed local root CA for WSS server: %s", server_certificate.ca_cert_path)
 
     LOGGER.info("Using account name for x_account_name header: %s", account_name)
 
