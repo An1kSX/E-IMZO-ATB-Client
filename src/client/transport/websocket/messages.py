@@ -11,8 +11,8 @@ def parse_proxy_command(raw_message: str | bytes) -> ProxyCommand:
 
     payload = json.loads(raw_message)
     return ProxyCommand(
-        plugin=payload["plugin"],
+        plugin=payload.get("plugin"),
         name=payload["name"],
         arguments=payload.get("arguments"),
-        has_arguments="arguments" in payload,
+        has_arguments=bool(payload.get("arguments")),
     )

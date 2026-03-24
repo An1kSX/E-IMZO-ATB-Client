@@ -48,8 +48,10 @@ async def run_app(config: AppConfig) -> None:
             endpoint_proxy = EimzoApiClient(
                 session=session,
                 api_base_url=config.api_eimzo_url,
+                api_path_prefix=config.api_eimzo_path_prefix,
                 account_name=account_name,
                 api_ca_cert_path=config.api_eimzo_ca_cert_path,
+                send_account_header=config.api_eimzo_send_account_header,
             )
             websocket_server = WebSocketProxyServer(
                 config=config,

@@ -14,7 +14,9 @@ class ConfigurationError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     api_eimzo_url: str
+    api_eimzo_path_prefix: str
     api_eimzo_ca_cert_path: Path | None
+    api_eimzo_send_account_header: bool
     ws_host: str
     ws_port: int
     ws_path: str
@@ -37,7 +39,9 @@ class AppConfig:
         api_eimzo_url = _require_env("API_EIMZO_URL").rstrip("/")
         config = cls(
             api_eimzo_url=api_eimzo_url,
+            api_eimzo_path_prefix=_normalize_api_path_prefix(os.getenv("API_EIMZO_PATH_PREFIX", "")),
             api_eimzo_ca_cert_path=_read_optional_path("API_EIMZO_CA_CERT_PATH"),
+            api_eimzo_send_account_header=_read_bool("API_EIMZO_SEND_ACCOUNT_HEADER", default=True),
             ws_host=os.getenv("WS_SERVER_HOST", "127.0.0.1"),
             ws_port=_read_int("WS_SERVER_PORT", default=64443),
             ws_path=_normalize_ws_path(os.getenv("WS_SERVER_PATH", "/")),
@@ -157,6 +161,16 @@ def _normalize_ws_path(value: str) -> str:
     if not value.startswith("/"):
         return f"/{value}"
     return value
+
+
+def _normalize_api_path_prefix(value: str) -> str:
+    if not value:
+        return ""
+
+    if not value.startswith("/"):
+        value = f"/{value}"
+
+    return value.rstrip("/")
 
 
 def _normalize_request_path(value: str | None) -> str:

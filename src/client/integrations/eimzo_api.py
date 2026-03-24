@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ _TEXTUAL_CONTENT_TYPES = {
     "application/problem+json",
     "application/xml",
 }
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,17 +46,23 @@ class EimzoApiClient:
         *,
         session: aiohttp.ClientSession,
         api_base_url: str,
+        api_path_prefix: str,
         account_name: str,
         api_ca_cert_path: Path | None = None,
+        send_account_header: bool = True,
     ) -> None:
         self._session = session
         self._api_base_url = api_base_url.rstrip("/")
+        self._api_path_prefix = api_path_prefix
         self._account_name = account_name
         self._api_ca_cert_path = api_ca_cert_path
+        self._send_account_header = send_account_header
 
     async def forward(self, command: ProxyCommand) -> ProxyResponse:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
-        headers = {"x_account_name": self._account_name}
+        headers: dict[str, str] = {}
+        if self._send_account_header:
+            headers["x_account_name"] = self._account_name
 
         request_kwargs: dict[str, Any] = {"headers": headers}
         if self._api_ca_cert_path is not None:
@@ -65,8 +73,16 @@ class EimzoApiClient:
             method = "POST"
             request_kwargs["json"] = command.arguments
 
+        LOGGER.info("Forwarding %s %s", method, endpoint_url)
         async with self._session.request(method, endpoint_url, **request_kwargs) as response:
             body = await response.read()
+            LOGGER.info(
+                "Received API response %s %s for %s %s",
+                response.status,
+                response.reason,
+                method,
+                endpoint_url,
+            )
             return ProxyResponse(
                 body=body,
                 content_type=response.content_type,
@@ -74,4 +90,4 @@ class EimzoApiClient:
             )
 
     def _build_endpoint_url(self, plugin: str, name: str) -> str:
-        return f"{self._api_base_url}/{plugin}/{name}"
+        return f"{self._api_base_url}{self._api_path_prefix}/{plugin}/{name}"
