@@ -67,9 +67,16 @@ class AppConfig:
         return f"wss://{self.ws_host}:{self.ws_port}{self.ws_path}"
 
     def matches_websocket_path(self, path: str | None) -> bool:
-        if path in {None, ""}:
-            path = "/"
-        return path == self.ws_path
+        normalized_request_path = _normalize_request_path(path)
+        normalized_configured_path = _normalize_request_path(self.ws_path)
+
+        # When the server is configured for the root path, accept any incoming path.
+        # This keeps the local bridge compatible with sites that hardcode legacy paths
+        # such as /service/cryptapi while preserving strict matching for custom paths.
+        if normalized_configured_path == "/":
+            return True
+
+        return normalized_request_path == normalized_configured_path
 
     def _validate(self) -> None:
         if (self.ws_server_cert_path is None) != (self.ws_server_key_path is None):
@@ -150,6 +157,22 @@ def _normalize_ws_path(value: str) -> str:
     if not value.startswith("/"):
         return f"/{value}"
     return value
+
+
+def _normalize_request_path(value: str | None) -> str:
+    if value in {None, ""}:
+        return "/"
+
+    path = value.split("?", 1)[0].split("#", 1)[0]
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    if len(path) > 1:
+        path = path.rstrip("/")
+        if not path:
+            return "/"
+
+    return path
 
 
 def _read_optional_path(name: str) -> Path | None:
