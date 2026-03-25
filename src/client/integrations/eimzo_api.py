@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 import aiohttp
 
 from client.domain.commands import ProxyCommand
+from client.domain.key_identity_store import KeyIdentityStore
 from client.system.certificates import build_client_ssl_context
 
 _TEXTUAL_CONTENT_TYPES = {
@@ -16,6 +18,10 @@ _TEXTUAL_CONTENT_TYPES = {
     "application/problem+json",
     "application/xml",
 }
+_PFX_PLUGIN_NAME = "pfx"
+_LOAD_KEY_COMMAND_NAME = "load_key"
+_PKCS7_PLUGIN_NAME = "pkcs7"
+_CREATE_PKCS7_COMMAND_NAME = "create_pkcs7"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -50,6 +56,7 @@ class EimzoApiClient:
         account_name: str,
         api_ca_cert_path: Path | None = None,
         send_account_header: bool = True,
+        key_identity_store: KeyIdentityStore | None = None,
     ) -> None:
         self._session = session
         self._api_base_url = api_base_url.rstrip("/")
@@ -57,9 +64,12 @@ class EimzoApiClient:
         self._account_name = account_name
         self._api_ca_cert_path = api_ca_cert_path
         self._send_account_header = send_account_header
+        self._key_identity_store = key_identity_store or KeyIdentityStore()
 
     async def forward(self, command: ProxyCommand) -> ProxyResponse:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
+        key_name = _extract_key_name_from_load_key_command(command)
+        request_arguments = self._build_request_arguments(command)
         headers: dict[str, str] = {}
         if self._send_account_header:
             headers["x-account-name"] = self._account_name
@@ -71,7 +81,7 @@ class EimzoApiClient:
         method = "GET"
         if command.has_arguments:
             method = "POST"
-            request_kwargs["json"] = command.arguments
+            request_kwargs["json"] = request_arguments
 
         LOGGER.info("Forwarding %s %s", method, endpoint_url)
         async with self._session.request(method, endpoint_url, **request_kwargs) as response:
@@ -90,11 +100,15 @@ class EimzoApiClient:
                     endpoint_url,
                     _format_body_for_log(body=body, charset=response.charset),
                 )
-            return ProxyResponse(
+
+            proxy_response = ProxyResponse(
                 body=body,
                 content_type=response.content_type,
                 charset=response.charset,
             )
+
+        self._remember_key_identity(key_name=key_name, response=proxy_response)
+        return proxy_response
 
     def _build_endpoint_url(self, plugin: str | None, name: str) -> str:
         segments = [self._api_base_url]
@@ -104,6 +118,52 @@ class EimzoApiClient:
             segments.append(str(plugin).strip("/"))
         segments.append(str(name).strip("/"))
         return "/".join(segment for segment in segments if segment)
+
+    def get_identity_by_key_id(self, key_id: str) -> str | None:
+        return self._key_identity_store.get(key_id)
+
+    def _remember_key_identity(self, *, key_name: str | None, response: ProxyResponse) -> None:
+        if key_name is None:
+            return
+
+        key_id = _extract_key_id_from_response(response.body, charset=response.charset)
+        if key_id is None:
+            return
+
+        identity = self._key_identity_store.remember(key_id=key_id, key_name=key_name)
+        if identity is None:
+            LOGGER.warning("Could not extract INN/PINFL from key name %r for keyId %s", key_name, key_id)
+            return
+
+        LOGGER.info("Stored keyId to INN/PINFL mapping: %s -> %s", key_id, identity)
+
+    def _build_request_arguments(self, command: ProxyCommand) -> Any:
+        arguments = command.arguments
+        if not command.has_arguments:
+            return arguments
+
+        if command.plugin != _PKCS7_PLUGIN_NAME or command.name != _CREATE_PKCS7_COMMAND_NAME:
+            return arguments
+
+        if not isinstance(arguments, (list, tuple)) or len(arguments) < 2:
+            return arguments
+
+        key_id = arguments[1]
+        if not isinstance(key_id, str) or not key_id.strip():
+            return arguments
+
+        identity = self._key_identity_store.get(key_id.strip())
+        if identity is None:
+            LOGGER.warning("No stored INN/PINFL found for keyId %s during pkcs7/create_pkcs7", key_id)
+            return arguments
+
+        request_arguments = list(arguments)
+        if request_arguments and request_arguments[-1] == identity:
+            return request_arguments
+
+        request_arguments.append(identity)
+        LOGGER.info("Added INN/PINFL %s to pkcs7/create_pkcs7 arguments for keyId %s", identity, key_id)
+        return request_arguments
 
 
 def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
@@ -120,3 +180,37 @@ def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
     if len(text) > 1000:
         return f"{text[:1000]}..."
     return text
+
+
+def _extract_key_name_from_load_key_command(command: ProxyCommand) -> str | None:
+    if command.plugin != _PFX_PLUGIN_NAME or command.name != _LOAD_KEY_COMMAND_NAME:
+        return None
+
+    arguments = command.arguments
+    if isinstance(arguments, (list, tuple)) and len(arguments) >= 3:
+        key_name = arguments[2]
+        if isinstance(key_name, str) and key_name.strip():
+            return key_name.strip()
+
+    return None
+
+
+def _extract_key_id_from_response(body: bytes, *, charset: str | None) -> str | None:
+    if not body:
+        return None
+
+    encoding = charset or "utf-8"
+    try:
+        payload = json.loads(body.decode(encoding))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if isinstance(payload, str) and payload.strip():
+        return payload.strip()
+
+    if isinstance(payload, dict):
+        key_id = payload.get("keyId") or payload.get("key_id")
+        if isinstance(key_id, str) and key_id.strip():
+            return key_id.strip()
+
+    return None
