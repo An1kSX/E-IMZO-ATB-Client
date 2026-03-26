@@ -22,6 +22,13 @@ _PFX_PLUGIN_NAME = "pfx"
 _LOAD_KEY_COMMAND_NAME = "load_key"
 _PKCS7_PLUGIN_NAME = "pkcs7"
 _CREATE_PKCS7_COMMAND_NAME = "create_pkcs7"
+_VERIFY_PASSWORD_COMMAND_NAME = "verify_password"
+_CHANGE_PASSWORD_COMMAND_NAME = "change_password"
+_IDENTITY_ARGUMENT_KEY_ID_INDEXES: dict[tuple[str | None, str], int] = {
+    (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME): 1,
+    (_PFX_PLUGIN_NAME, _VERIFY_PASSWORD_COMMAND_NAME): 0,
+    (_PFX_PLUGIN_NAME, _CHANGE_PASSWORD_COMMAND_NAME): 0,
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -142,19 +149,17 @@ class EimzoApiClient:
         if not command.has_arguments:
             return arguments
 
-        if command.plugin != _PKCS7_PLUGIN_NAME or command.name != _CREATE_PKCS7_COMMAND_NAME:
+        if not isinstance(arguments, (list, tuple)):
             return arguments
 
-        if not isinstance(arguments, (list, tuple)) or len(arguments) < 2:
+        key_id = _extract_key_id_from_identity_command(command=command, arguments=arguments)
+        if key_id is None:
             return arguments
 
-        key_id = arguments[1]
-        if not isinstance(key_id, str) or not key_id.strip():
-            return arguments
-
-        identity = self._key_identity_store.get(key_id.strip())
+        command_label = _format_command_label(plugin=command.plugin, name=command.name)
+        identity = self._key_identity_store.get(key_id)
         if identity is None:
-            LOGGER.warning("No stored INN/PINFL found for keyId %s during pkcs7/create_pkcs7", key_id)
+            LOGGER.warning("No stored INN/PINFL found for keyId %s during %s", key_id, command_label)
             return arguments
 
         request_arguments = list(arguments)
@@ -162,7 +167,7 @@ class EimzoApiClient:
             return request_arguments
 
         request_arguments.append(identity)
-        LOGGER.info("Added INN/PINFL %s to pkcs7/create_pkcs7 arguments for keyId %s", identity, key_id)
+        LOGGER.info("Added INN/PINFL %s to %s arguments for keyId %s", identity, command_label, key_id)
         return request_arguments
 
 
@@ -193,6 +198,24 @@ def _extract_key_name_from_load_key_command(command: ProxyCommand) -> str | None
             return key_name.strip()
 
     return None
+
+
+def _extract_key_id_from_identity_command(*, command: ProxyCommand, arguments: list[Any] | tuple[Any, ...]) -> str | None:
+    key_id_index = _IDENTITY_ARGUMENT_KEY_ID_INDEXES.get((command.plugin, command.name))
+    if key_id_index is None or len(arguments) <= key_id_index:
+        return None
+
+    key_id = arguments[key_id_index]
+    if not isinstance(key_id, str) or not key_id.strip():
+        return None
+
+    return key_id.strip()
+
+
+def _format_command_label(*, plugin: str | None, name: str) -> str:
+    if plugin:
+        return f"{plugin}/{name}"
+    return name
 
 
 def _extract_key_id_from_response(body: bytes, *, charset: str | None) -> str | None:

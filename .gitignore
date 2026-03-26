@@ -6,5 +6,6 @@ old/
 *.code-workspace
 .venv/
 dist/
+tests/
 *.egg-info/
 build/pyinstaller/
