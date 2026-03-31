@@ -9,6 +9,7 @@ from client.app import run_app
 from client.bootstrap.config import AppConfig, ConfigurationError
 from client.bootstrap.logging import configure_logging
 from client.system.app_icon import resolve_app_icon_path
+from client.system.autostart import sync_windows_auto_start
 from client.system.tray_icon import WindowsTrayIcon
 
 _TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -29,6 +30,7 @@ def main() -> None:
         runtime_dir=config.runtime_dir,
         log_dir=config.log_dir,
     )
+    sync_windows_auto_start(enabled=config.windows_auto_start_enabled)
 
     try:
         asyncio.run(_run_with_system_tray(config))

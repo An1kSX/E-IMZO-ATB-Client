@@ -25,6 +25,7 @@ class AppConfig:
     api_eimzo_ca_cert_path: Path | None
     api_eimzo_send_account_header: bool
     log_dir: Path
+    windows_auto_start_enabled: bool
     ws_host: str
     ws_port: int
     ws_path: str
@@ -63,6 +64,7 @@ class AppConfig:
             api_eimzo_ca_cert_path=_read_optional_path("API_EIMZO_CA_CERT_PATH"),
             api_eimzo_send_account_header=_read_bool("API_EIMZO_SEND_ACCOUNT_HEADER", default=True),
             log_dir=_build_log_dir(runtime_dir),
+            windows_auto_start_enabled=_read_bool("WINDOWS_AUTO_START", default=True),
             ws_host=os.getenv("WS_SERVER_HOST", "127.0.0.1"),
             ws_port=_read_int("WS_SERVER_PORT", default=64443),
             ws_path=_normalize_ws_path(os.getenv("WS_SERVER_PATH", "/")),
