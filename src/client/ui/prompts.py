@@ -132,7 +132,7 @@ def _show_confirmation_dialog(*, command_label: str, identity: str) -> bool:
 
         def buttonbox(self) -> None:
             box = ttk.Frame(self, padding=(16, 0, 16, 16))
-            box.grid(sticky="e")
+            box.pack()
 
             approve_button = ttk.Button(box, text="Да", width=14, command=self.ok, default="active")
             approve_button.grid(row=0, column=0, padx=(0, 8))
@@ -218,7 +218,7 @@ def _show_password_dialog(
 
         def buttonbox(self) -> None:
             box = ttk.Frame(self, padding=(16, 0, 16, 16))
-            box.grid(sticky="e")
+            box.pack()
 
             login_button = ttk.Button(box, text="Войти", width=14, command=self.ok, default="active")
             login_button.grid(row=0, column=0, padx=(0, 8))
@@ -304,7 +304,7 @@ def _show_api_base_url_dialog(
 
         def buttonbox(self) -> None:
             box = ttk.Frame(self, padding=(16, 0, 16, 16))
-            box.grid(sticky="e")
+            box.pack()
 
             save_button = ttk.Button(box, text="Сохранить", width=14, command=self.ok, default="active")
             save_button.grid(row=0, column=0, padx=(0, 8))

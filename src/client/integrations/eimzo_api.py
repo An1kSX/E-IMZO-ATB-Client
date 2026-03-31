@@ -120,6 +120,12 @@ class EimzoApiClient:
         self._access_token: AccessToken | None = None
         self._auth_lock = asyncio.Lock()
 
+    async def ensure_authenticated(self) -> bool:
+        token = await self._ensure_access_token(
+            reason="Введите пароль для входа в E-IMZO перед началом работы приложения.",
+        )
+        return token is not None
+
     async def forward(self, command: ProxyCommand) -> ProxyResponse:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
         key_name = _extract_key_name_from_load_key_command(command)

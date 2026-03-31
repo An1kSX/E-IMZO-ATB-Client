@@ -56,6 +56,14 @@ async def run_app(config: AppConfig) -> None:
                 send_account_header=config.api_eimzo_send_account_header,
                 prompt_service=prompt_service,
             )
+            startup_authenticated = await endpoint_proxy.ensure_authenticated()
+            if startup_authenticated:
+                LOGGER.info("Validated E-IMZO JWT session during startup.")
+            else:
+                LOGGER.warning(
+                    "E-IMZO startup authentication was cancelled. "
+                    "The password prompt will appear again on the first protected request."
+                )
             websocket_server = WebSocketProxyServer(
                 config=config,
                 endpoint_proxy=endpoint_proxy,
