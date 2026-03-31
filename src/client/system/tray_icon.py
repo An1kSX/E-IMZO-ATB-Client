@@ -20,6 +20,7 @@ _WM_TRAYICON = _WM_APP + 1
 
 _NIM_ADD = 0x00000000
 _NIM_DELETE = 0x00000002
+_NIM_SETFOCUS = 0x00000003
 _NIM_SETVERSION = 0x00000004
 _NIF_MESSAGE = 0x00000001
 _NIF_ICON = 0x00000002
@@ -284,7 +285,7 @@ class WindowsTrayIcon:
         self._icon_handle = None
         self._owns_icon_handle = False
 
-    def _show_context_menu(self, hwnd: int) -> None:
+    def _show_context_menu(self, hwnd: int, *, anchor: _POINT | None = None) -> None:
         menu = _user32.CreatePopupMenu()
         if not menu:
             return
@@ -293,8 +294,9 @@ class WindowsTrayIcon:
             _user32.AppendMenuW(menu, _MF_STRING, _EXIT_MENU_ITEM_ID, "Выход")
             _user32.SetForegroundWindow(hwnd)
 
-            cursor_position = _POINT()
-            _user32.GetCursorPos(ctypes.byref(cursor_position))
+            cursor_position = anchor or _POINT()
+            if anchor is None:
+                _user32.GetCursorPos(ctypes.byref(cursor_position))
             selected_item = _user32.TrackPopupMenu(
                 menu,
                 _TPM_LEFTALIGN | _TPM_BOTTOMALIGN | _TPM_RIGHTBUTTON | _TPM_RETURNCMD,
@@ -309,9 +311,14 @@ class WindowsTrayIcon:
                 self._on_exit_request()
                 _user32.DestroyWindow(hwnd)
 
+            self._set_tray_focus(hwnd)
             _user32.PostMessageW(hwnd, _WM_NULL, 0, 0)
         finally:
             _user32.DestroyMenu(menu)
+
+    def _set_tray_focus(self, hwnd: int) -> None:
+        notify_data = self._build_notify_data(hwnd)
+        _shell32.Shell_NotifyIconW(_NIM_SETFOCUS, ctypes.byref(notify_data))
 
     def _wnd_proc(
         self,
@@ -320,8 +327,8 @@ class WindowsTrayIcon:
         w_param: int,
         l_param: int,
     ) -> int:
-        if message == _WM_TRAYICON and l_param in {_WM_RBUTTONUP, _WM_CONTEXTMENU}:
-            self._show_context_menu(hwnd)
+        if message == _WM_TRAYICON and _low_word(l_param) in {_WM_RBUTTONUP, _WM_CONTEXTMENU}:
+            self._show_context_menu(hwnd, anchor=_notification_anchor_point(w_param))
             return 0
 
         if message == _WM_DESTROY:
@@ -334,3 +341,22 @@ class WindowsTrayIcon:
 
 def _make_int_resource(value: int) -> wintypes.LPCWSTR:
     return ctypes.cast(ctypes.c_void_p(value & 0xFFFF), wintypes.LPCWSTR)
+
+
+def _low_word(value: int) -> int:
+    return value & 0xFFFF
+
+
+def _high_word(value: int) -> int:
+    return (value >> 16) & 0xFFFF
+
+
+def _signed_word(value: int) -> int:
+    return value - 0x10000 if value & 0x8000 else value
+
+
+def _notification_anchor_point(w_param: int) -> _POINT:
+    return _POINT(
+        x=_signed_word(_low_word(w_param)),
+        y=_signed_word(_high_word(w_param)),
+    )
