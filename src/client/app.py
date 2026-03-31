@@ -10,6 +10,7 @@ from client.integrations.eimzo_api import EimzoApiClient
 from client.system.account import resolve_account_name
 from client.system.certificates import maintain_localhost_certificate, resolve_server_certificate
 from client.transport.websocket.server import WebSocketProxyServer
+from client.ui.prompts import TkPromptService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ async def run_app(config: AppConfig) -> None:
     server_certificate = resolve_server_certificate(config)
     certificate_rotation_event = asyncio.Event()
     certificate_task: asyncio.Task[None] | None = None
+    prompt_service = TkPromptService()
 
     if server_certificate.managed and server_certificate.renewed:
         LOGGER.info(
@@ -41,7 +43,7 @@ async def run_app(config: AppConfig) -> None:
     if server_certificate.managed and server_certificate.ca_cert_path is not None:
         LOGGER.info("Using managed local root CA for WSS server: %s", server_certificate.ca_cert_path)
 
-    LOGGER.info("Using account name for x_account_name header: %s", account_name)
+    LOGGER.info("Using account name for E-IMZO authentication: %s", account_name)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -52,6 +54,7 @@ async def run_app(config: AppConfig) -> None:
                 account_name=account_name,
                 api_ca_cert_path=config.api_eimzo_ca_cert_path,
                 send_account_header=config.api_eimzo_send_account_header,
+                prompt_service=prompt_service,
             )
             websocket_server = WebSocketProxyServer(
                 config=config,
@@ -62,6 +65,7 @@ async def run_app(config: AppConfig) -> None:
             )
             await websocket_server.run_forever()
     finally:
+        prompt_service.close()
         if certificate_task is not None:
             certificate_task.cancel()
             await asyncio.gather(certificate_task, return_exceptions=True)

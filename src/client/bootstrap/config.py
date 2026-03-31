@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
+from typing import Callable
+from urllib.parse import urlparse
 
 from client.bootstrap.dotenv import load_dotenv
+from client.bootstrap.settings import AppSettings, AppSettingsStore
+from client.ui import prompt_api_base_url
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ConfigurationError(RuntimeError):
@@ -17,6 +24,7 @@ class AppConfig:
     api_eimzo_path_prefix: str
     api_eimzo_ca_cert_path: Path | None
     api_eimzo_send_account_header: bool
+    log_dir: Path
     ws_host: str
     ws_port: int
     ws_path: str
@@ -34,14 +42,27 @@ class AppConfig:
     account_name_override: str | None = None
 
     @classmethod
-    def from_env(cls) -> "AppConfig":
+    def from_env(
+        cls,
+        *,
+        prompt_api_url: Callable[[str | None, str | None], str | None] | None = None,
+    ) -> "AppConfig":
         load_dotenv()
-        api_eimzo_url = _require_env("API_EIMZO_URL").rstrip("/")
+        runtime_dir = _build_runtime_dir()
+        settings_store = AppSettingsStore(runtime_dir)
+        settings = settings_store.load()
+        api_eimzo_url = _resolve_api_eimzo_url(
+            runtime_dir=runtime_dir,
+            settings=settings,
+            settings_store=settings_store,
+            prompt_api_url=prompt_api_url or _prompt_api_url,
+        )
         config = cls(
             api_eimzo_url=api_eimzo_url,
             api_eimzo_path_prefix=_normalize_api_path_prefix(os.getenv("API_EIMZO_PATH_PREFIX", "")),
             api_eimzo_ca_cert_path=_read_optional_path("API_EIMZO_CA_CERT_PATH"),
             api_eimzo_send_account_header=_read_bool("API_EIMZO_SEND_ACCOUNT_HEADER", default=True),
+            log_dir=_build_log_dir(runtime_dir),
             ws_host=os.getenv("WS_SERVER_HOST", "127.0.0.1"),
             ws_port=_read_int("WS_SERVER_PORT", default=64443),
             ws_path=_normalize_ws_path(os.getenv("WS_SERVER_PATH", "/")),
@@ -56,7 +77,7 @@ class AppConfig:
             ws_ping_timeout_seconds=_read_float("WS_PING_TIMEOUT_SECONDS", default=20.0),
             http_timeout_seconds=_read_float("HTTP_TIMEOUT_SECONDS", default=60.0),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
-            runtime_dir=_build_runtime_dir(),
+            runtime_dir=runtime_dir,
             local_cert_valid_days=_read_int("LOCAL_CERT_VALID_DAYS", default=365),
             local_cert_renew_before_days=_read_int("LOCAL_CERT_RENEW_BEFORE_DAYS", default=30),
             account_name_override=os.getenv("ACCOUNT_NAME_OVERRIDE"),
@@ -112,6 +133,59 @@ def _build_runtime_dir() -> Path:
         return Path(local_app_data) / "E-IMZO-ATB-Client"
 
     return Path.cwd() / ".runtime"
+
+
+def _build_log_dir(runtime_dir: Path) -> Path:
+    configured_path = os.getenv("APP_LOG_DIR")
+    if configured_path:
+        return Path(configured_path).expanduser()
+
+    return runtime_dir / "logs"
+
+
+def _resolve_api_eimzo_url(
+    *,
+    runtime_dir: Path,
+    settings: AppSettings,
+    settings_store: AppSettingsStore,
+    prompt_api_url: Callable[[str | None, str | None], str | None],
+) -> str:
+    env_value = os.getenv("API_EIMZO_URL")
+    if env_value:
+        normalized_url = _normalize_api_base_url(env_value, source="API_EIMZO_URL")
+        LOGGER.info("Using E-IMZO API URL from environment: %s", normalized_url)
+        return normalized_url
+
+    if settings.api_eimzo_url:
+        try:
+            normalized_url = _normalize_api_base_url(settings.api_eimzo_url, source="saved app settings")
+            LOGGER.info("Using saved E-IMZO API URL from app settings: %s", normalized_url)
+            return normalized_url
+        except ConfigurationError:
+            pass
+
+    current_value = settings.api_eimzo_url
+    error_message: str | None = None
+    while True:
+        prompt_value = prompt_api_url(current_value, error_message)
+        if not prompt_value:
+            raise ConfigurationError("API_EIMZO_URL is required.")
+
+        try:
+            normalized_url = _normalize_api_base_url(prompt_value, source="UI input")
+        except ConfigurationError as error:
+            current_value = prompt_value
+            error_message = str(error)
+            continue
+
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        settings_store.save(AppSettings(api_eimzo_url=normalized_url))
+        LOGGER.info("Saved E-IMZO API URL from UI input to app settings: %s", normalized_url)
+        return normalized_url
+
+
+def _prompt_api_url(initial_value: str | None, error_message: str | None) -> str | None:
+    return prompt_api_base_url(initial_value=initial_value, error_message=error_message)
 
 
 def _require_env(name: str) -> str:
@@ -171,6 +245,20 @@ def _normalize_api_path_prefix(value: str) -> str:
         value = f"/{value}"
 
     return value.rstrip("/")
+
+
+def _normalize_api_base_url(value: str, *, source: str) -> str:
+    normalized_value = value.strip().rstrip("/")
+    if not normalized_value:
+        raise ConfigurationError(f"{source} must not be empty.")
+
+    parsed = urlparse(normalized_value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigurationError(
+            f"{source} must be a valid http(s) URL, got {value!r}."
+        )
+
+    return normalized_value
 
 
 def _normalize_request_path(value: str | None) -> str:

@@ -1,0 +1,286 @@
+from __future__ import annotations
+
+import ctypes
+from ctypes import wintypes
+import logging
+import threading
+from typing import Callable
+
+LOGGER = logging.getLogger(__name__)
+
+_WM_CLOSE = 0x0010
+_WM_DESTROY = 0x0002
+_WM_NULL = 0x0000
+_WM_RBUTTONUP = 0x0205
+_WM_CONTEXTMENU = 0x007B
+_WM_APP = 0x8000
+_WM_TRAYICON = _WM_APP + 1
+
+_NIM_ADD = 0x00000000
+_NIM_DELETE = 0x00000002
+_NIM_SETVERSION = 0x00000004
+_NIF_MESSAGE = 0x00000001
+_NIF_ICON = 0x00000002
+_NIF_TIP = 0x00000004
+_NOTIFYICON_VERSION_4 = 4
+
+_MF_STRING = 0x00000000
+_TPM_LEFTALIGN = 0x0000
+_TPM_BOTTOMALIGN = 0x0020
+_TPM_RIGHTBUTTON = 0x0002
+_TPM_RETURNCMD = 0x0100
+
+_IDI_APPLICATION = 32512
+_EXIT_MENU_ITEM_ID = 1001
+_TOOLTIP_TEXT = "E-IMZO ATB Client"
+_WINDOW_CLASS_NAME = "EimzoAtbClientTrayWindow"
+
+_user32 = ctypes.windll.user32
+_kernel32 = ctypes.windll.kernel32
+_shell32 = ctypes.windll.shell32
+_LRESULT = ctypes.c_ssize_t
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [
+        ("x", wintypes.LONG),
+        ("y", wintypes.LONG),
+    ]
+
+
+class _MSG(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("message", wintypes.UINT),
+        ("wParam", wintypes.WPARAM),
+        ("lParam", wintypes.LPARAM),
+        ("time", wintypes.DWORD),
+        ("pt", _POINT),
+        ("lPrivate", wintypes.DWORD),
+    ]
+
+
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = [
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", ctypes.c_void_p),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", wintypes.HANDLE),
+        ("hCursor", wintypes.HANDLE),
+        ("hbrBackground", wintypes.HANDLE),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+    ]
+
+
+class _NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", wintypes.HANDLE),
+        ("szTip", wintypes.WCHAR * 128),
+        ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD),
+        ("szInfo", wintypes.WCHAR * 256),
+        ("uVersion", wintypes.UINT),
+        ("szInfoTitle", wintypes.WCHAR * 64),
+        ("dwInfoFlags", wintypes.DWORD),
+        ("guidItem", _GUID),
+        ("hBalloonIcon", wintypes.HANDLE),
+    ]
+
+
+_WNDPROC = ctypes.WINFUNCTYPE(
+    _LRESULT,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
+
+
+class WindowsTrayIcon:
+    def __init__(self, *, on_exit_request: Callable[[], None]) -> None:
+        self._on_exit_request = on_exit_request
+        self._thread: threading.Thread | None = None
+        self._thread_id: int | None = None
+        self._hwnd: int | None = None
+        self._window_proc = _WNDPROC(self._wnd_proc)
+        self._ready_event = threading.Event()
+        self._startup_error: BaseException | None = None
+        self._icon_added = False
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+
+        self._thread = threading.Thread(
+            target=self._run_message_loop,
+            name="eimzo-tray-icon",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready_event.wait(timeout=5.0)
+        if self._startup_error is not None:
+            raise RuntimeError("Failed to start Windows tray icon.") from self._startup_error
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+
+        hwnd = self._hwnd
+        if hwnd:
+            _user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+        elif self._thread_id is not None:
+            _user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
+
+        self._thread.join(timeout=5.0)
+        self._thread = None
+
+    def _run_message_loop(self) -> None:
+        try:
+            self._thread_id = _kernel32.GetCurrentThreadId()
+            self._hwnd = self._create_hidden_window()
+            self._add_tray_icon()
+        except BaseException as error:  # noqa: BLE001
+            self._startup_error = error
+            self._ready_event.set()
+            return
+
+        self._ready_event.set()
+
+        message = _MSG()
+        while _user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+            _user32.TranslateMessage(ctypes.byref(message))
+            _user32.DispatchMessageW(ctypes.byref(message))
+
+        self._remove_tray_icon()
+        self._hwnd = None
+
+    def _create_hidden_window(self) -> int:
+        hinstance = _kernel32.GetModuleHandleW(None)
+
+        window_class = _WNDCLASSW()
+        window_class.lpfnWndProc = ctypes.cast(self._window_proc, ctypes.c_void_p).value
+        window_class.hInstance = hinstance
+        window_class.lpszClassName = _WINDOW_CLASS_NAME
+        atom = _user32.RegisterClassW(ctypes.byref(window_class))
+        if atom == 0:
+            error_code = ctypes.get_last_error()
+            if error_code != 1410:
+                raise ctypes.WinError(error_code)
+
+        hwnd = _user32.CreateWindowExW(
+            0,
+            _WINDOW_CLASS_NAME,
+            _WINDOW_CLASS_NAME,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            hinstance,
+            None,
+        )
+        if hwnd == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        return hwnd
+
+    def _add_tray_icon(self) -> None:
+        if self._hwnd is None:
+            return
+
+        notify_data = self._build_notify_data(self._hwnd)
+        if not _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(notify_data)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        notify_data.uVersion = _NOTIFYICON_VERSION_4
+        _shell32.Shell_NotifyIconW(_NIM_SETVERSION, ctypes.byref(notify_data))
+        self._icon_added = True
+
+    def _remove_tray_icon(self) -> None:
+        if not self._icon_added or self._hwnd is None:
+            return
+
+        notify_data = self._build_notify_data(self._hwnd)
+        _shell32.Shell_NotifyIconW(_NIM_DELETE, ctypes.byref(notify_data))
+        self._icon_added = False
+
+    def _build_notify_data(self, hwnd: int) -> _NOTIFYICONDATAW:
+        notify_data = _NOTIFYICONDATAW()
+        notify_data.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
+        notify_data.hWnd = hwnd
+        notify_data.uID = 1
+        notify_data.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP
+        notify_data.uCallbackMessage = _WM_TRAYICON
+        notify_data.hIcon = _user32.LoadIconW(None, _make_int_resource(_IDI_APPLICATION))
+        notify_data.szTip = _TOOLTIP_TEXT
+        return notify_data
+
+    def _show_context_menu(self, hwnd: int) -> None:
+        menu = _user32.CreatePopupMenu()
+        if not menu:
+            return
+
+        try:
+            _user32.AppendMenuW(menu, _MF_STRING, _EXIT_MENU_ITEM_ID, "Выход")
+            _user32.SetForegroundWindow(hwnd)
+
+            cursor_position = _POINT()
+            _user32.GetCursorPos(ctypes.byref(cursor_position))
+            selected_item = _user32.TrackPopupMenu(
+                menu,
+                _TPM_LEFTALIGN | _TPM_BOTTOMALIGN | _TPM_RIGHTBUTTON | _TPM_RETURNCMD,
+                cursor_position.x,
+                cursor_position.y,
+                0,
+                hwnd,
+                None,
+            )
+            if selected_item == _EXIT_MENU_ITEM_ID:
+                LOGGER.info("Shutdown requested from tray icon.")
+                self._on_exit_request()
+                _user32.DestroyWindow(hwnd)
+
+            _user32.PostMessageW(hwnd, _WM_NULL, 0, 0)
+        finally:
+            _user32.DestroyMenu(menu)
+
+    def _wnd_proc(
+        self,
+        hwnd: int,
+        message: int,
+        w_param: int,
+        l_param: int,
+    ) -> int:
+        if message == _WM_TRAYICON and l_param in {_WM_RBUTTONUP, _WM_CONTEXTMENU}:
+            self._show_context_menu(hwnd)
+            return 0
+
+        if message == _WM_DESTROY:
+            self._remove_tray_icon()
+            _user32.PostQuitMessage(0)
+            return 0
+
+        return _user32.DefWindowProcW(hwnd, message, w_param, l_param)
+
+
+def _make_int_resource(value: int) -> wintypes.LPCWSTR:
+    return ctypes.cast(ctypes.c_void_p(value & 0xFFFF), wintypes.LPCWSTR)

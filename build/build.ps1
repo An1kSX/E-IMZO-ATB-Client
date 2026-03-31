@@ -7,6 +7,7 @@ python -m PyInstaller `
   --noconfirm `
   --clean `
   --onefile `
+  --windowed `
   --name "eimzo-atb-client" `
   --paths "src" `
   --collect-all "aiohttp" `
