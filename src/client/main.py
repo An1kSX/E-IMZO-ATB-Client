@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import platform
 
 from client.app import run_app
 from client.bootstrap.config import AppConfig, ConfigurationError
 from client.bootstrap.logging import configure_logging
+from client.system.app_icon import resolve_app_icon_path
 from client.system.tray_icon import WindowsTrayIcon
+
+_TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 def main() -> None:
@@ -42,7 +46,10 @@ async def _run_with_system_tray(config: AppConfig) -> None:
 
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
-    tray_icon = WindowsTrayIcon(on_exit_request=lambda: loop.call_soon_threadsafe(shutdown_event.set))
+    tray_icon = WindowsTrayIcon(
+        on_exit_request=lambda: loop.call_soon_threadsafe(shutdown_event.set),
+        icon_path=resolve_app_icon_path(),
+    )
     app_task = asyncio.create_task(run_app(config), name="run-app")
     shutdown_task = asyncio.create_task(shutdown_event.wait(), name="wait-for-tray-exit")
 
@@ -64,7 +71,18 @@ async def _run_with_system_tray(config: AppConfig) -> None:
         if shutdown_task in done:
             logging.getLogger(__name__).info("Stopping application because of tray exit request.")
             app_task.cancel()
-            await asyncio.gather(app_task, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(app_task, return_exceptions=True),
+                    timeout=_TRAY_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logging.getLogger(__name__).error(
+                    "Graceful shutdown timed out after %.1f seconds. Forcing process exit.",
+                    _TRAY_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+                tray_icon.stop()
+                _force_process_exit(0)
             return
 
         shutdown_task.cancel()
@@ -88,6 +106,10 @@ def _install_windows_event_loop() -> None:
     install = getattr(winloop, "install", None)
     if callable(install):
         install()
+
+
+def _force_process_exit(code: int) -> None:
+    os._exit(code)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import logging
+from pathlib import Path
+import sys
 import threading
 from typing import Callable
 
@@ -34,6 +36,9 @@ _IDI_APPLICATION = 32512
 _EXIT_MENU_ITEM_ID = 1001
 _TOOLTIP_TEXT = "E-IMZO ATB Client"
 _WINDOW_CLASS_NAME = "EimzoAtbClientTrayWindow"
+_IMAGE_ICON = 1
+_LR_LOADFROMFILE = 0x00000010
+_LR_DEFAULTSIZE = 0x00000040
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -114,8 +119,14 @@ _WNDPROC = ctypes.WINFUNCTYPE(
 
 
 class WindowsTrayIcon:
-    def __init__(self, *, on_exit_request: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        *,
+        on_exit_request: Callable[[], None],
+        icon_path: Path | None = None,
+    ) -> None:
         self._on_exit_request = on_exit_request
+        self._icon_path = icon_path
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
         self._hwnd: int | None = None
@@ -123,6 +134,8 @@ class WindowsTrayIcon:
         self._ready_event = threading.Event()
         self._startup_error: BaseException | None = None
         self._icon_added = False
+        self._icon_handle: int | None = None
+        self._owns_icon_handle = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -169,6 +182,7 @@ class WindowsTrayIcon:
             _user32.DispatchMessageW(ctypes.byref(message))
 
         self._remove_tray_icon()
+        self._release_icon()
         self._hwnd = None
 
     def _create_hidden_window(self) -> int:
@@ -230,9 +244,45 @@ class WindowsTrayIcon:
         notify_data.uID = 1
         notify_data.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP
         notify_data.uCallbackMessage = _WM_TRAYICON
-        notify_data.hIcon = _user32.LoadIconW(None, _make_int_resource(_IDI_APPLICATION))
+        notify_data.hIcon = self._resolve_icon_handle()
         notify_data.szTip = _TOOLTIP_TEXT
         return notify_data
+
+    def _resolve_icon_handle(self) -> int:
+        if self._icon_handle:
+            return self._icon_handle
+
+        if self._icon_path is not None:
+            loaded_icon = _user32.LoadImageW(
+                None,
+                str(self._icon_path),
+                _IMAGE_ICON,
+                0,
+                0,
+                _LR_LOADFROMFILE | _LR_DEFAULTSIZE,
+            )
+            if loaded_icon:
+                self._icon_handle = int(loaded_icon)
+                self._owns_icon_handle = True
+                return self._icon_handle
+            LOGGER.warning("Could not load tray icon from %s", self._icon_path)
+
+        if getattr(sys, "frozen", False):
+            extracted_icon = _shell32.ExtractIconW(None, str(Path(sys.executable)), 0)
+            if extracted_icon and int(extracted_icon) > 1:
+                self._icon_handle = int(extracted_icon)
+                self._owns_icon_handle = True
+                return self._icon_handle
+
+        self._icon_handle = int(_user32.LoadIconW(None, _make_int_resource(_IDI_APPLICATION)))
+        self._owns_icon_handle = False
+        return self._icon_handle
+
+    def _release_icon(self) -> None:
+        if self._icon_handle and self._owns_icon_handle:
+            _user32.DestroyIcon(self._icon_handle)
+        self._icon_handle = None
+        self._owns_icon_handle = False
 
     def _show_context_menu(self, hwnd: int) -> None:
         menu = _user32.CreatePopupMenu()
