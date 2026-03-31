@@ -13,6 +13,7 @@ LOGGER = logging.getLogger(__name__)
 _WM_CLOSE = 0x0010
 _WM_DESTROY = 0x0002
 _WM_NULL = 0x0000
+_WM_RBUTTONDOWN = 0x0204
 _WM_RBUTTONUP = 0x0205
 _WM_CONTEXTMENU = 0x007B
 _WM_APP = 0x8000
@@ -327,8 +328,27 @@ class WindowsTrayIcon:
         w_param: int,
         l_param: int,
     ) -> int:
-        if message == _WM_TRAYICON and _low_word(l_param) in {_WM_RBUTTONUP, _WM_CONTEXTMENU}:
-            self._show_context_menu(hwnd, anchor=_notification_anchor_point(w_param))
+        if message == _WM_TRAYICON:
+            event_code, anchor = _resolve_tray_event(w_param, l_param)
+            LOGGER.debug(
+                "Tray callback received: event=%#x wParam=%#x lParam=%#x anchor=%s",
+                event_code,
+                w_param,
+                l_param,
+                None if anchor is None else f"({anchor.x}, {anchor.y})",
+            )
+            if event_code in {_WM_RBUTTONDOWN, _WM_RBUTTONUP, _WM_CONTEXTMENU}:
+                self._show_context_menu(hwnd, anchor=anchor)
+                return 0
+
+        if message == _WM_CONTEXTMENU:
+            LOGGER.debug(
+                "Window context-menu message received directly: hwnd=%s wParam=%#x lParam=%#x",
+                hwnd,
+                w_param,
+                l_param,
+            )
+            self._show_context_menu(hwnd)
             return 0
 
         if message == _WM_DESTROY:
@@ -360,3 +380,9 @@ def _notification_anchor_point(w_param: int) -> _POINT:
         x=_signed_word(_low_word(w_param)),
         y=_signed_word(_high_word(w_param)),
     )
+
+
+def _resolve_tray_event(w_param: int, l_param: int) -> tuple[int, _POINT | None]:
+    if _high_word(l_param):
+        return _low_word(l_param), _notification_anchor_point(w_param)
+    return int(l_param), None
