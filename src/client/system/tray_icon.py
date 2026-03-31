@@ -9,6 +9,7 @@ import threading
 from typing import Callable
 
 LOGGER = logging.getLogger(__name__)
+_USER_ACTION_LOG_EXTRA = {"user_action": True}
 
 _WM_CLOSE = 0x0010
 _WM_DESTROY = 0x0002
@@ -138,6 +139,7 @@ class WindowsTrayIcon:
         self._icon_added = False
         self._icon_handle: int | None = None
         self._owns_icon_handle = False
+        self._shutdown_requested = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -286,40 +288,15 @@ class WindowsTrayIcon:
         self._icon_handle = None
         self._owns_icon_handle = False
 
-    def _show_context_menu(self, hwnd: int, *, anchor: _POINT | None = None) -> None:
-        menu = _user32.CreatePopupMenu()
-        if not menu:
+    def _request_shutdown(self, hwnd: int, *, reason: str) -> None:
+        if self._shutdown_requested:
             return
 
-        try:
-            _user32.AppendMenuW(menu, _MF_STRING, _EXIT_MENU_ITEM_ID, "Выход")
-            _user32.SetForegroundWindow(hwnd)
-
-            cursor_position = anchor or _POINT()
-            if anchor is None:
-                _user32.GetCursorPos(ctypes.byref(cursor_position))
-            selected_item = _user32.TrackPopupMenu(
-                menu,
-                _TPM_LEFTALIGN | _TPM_BOTTOMALIGN | _TPM_RIGHTBUTTON | _TPM_RETURNCMD,
-                cursor_position.x,
-                cursor_position.y,
-                0,
-                hwnd,
-                None,
-            )
-            if selected_item == _EXIT_MENU_ITEM_ID:
-                LOGGER.info("Shutdown requested from tray icon.")
-                self._on_exit_request()
-                _user32.DestroyWindow(hwnd)
-
-            self._set_tray_focus(hwnd)
-            _user32.PostMessageW(hwnd, _WM_NULL, 0, 0)
-        finally:
-            _user32.DestroyMenu(menu)
-
-    def _set_tray_focus(self, hwnd: int) -> None:
-        notify_data = self._build_notify_data(hwnd)
-        _shell32.Shell_NotifyIconW(_NIM_SETFOCUS, ctypes.byref(notify_data))
+        self._shutdown_requested = True
+        LOGGER.info("Shutdown requested from tray icon: %s", reason, extra=_USER_ACTION_LOG_EXTRA)
+        self._on_exit_request()
+        if hwnd:
+            _user32.DestroyWindow(hwnd)
 
     def _wnd_proc(
         self,
@@ -338,7 +315,7 @@ class WindowsTrayIcon:
                 None if anchor is None else f"({anchor.x}, {anchor.y})",
             )
             if event_code in {_WM_RBUTTONDOWN, _WM_RBUTTONUP, _WM_CONTEXTMENU}:
-                self._show_context_menu(hwnd, anchor=anchor)
+                self._request_shutdown(hwnd, reason=f"tray-event:{event_code:#x}")
                 return 0
 
         if message == _WM_CONTEXTMENU:
@@ -348,7 +325,7 @@ class WindowsTrayIcon:
                 w_param,
                 l_param,
             )
-            self._show_context_menu(hwnd)
+            self._request_shutdown(hwnd, reason="window-context-menu")
             return 0
 
         if message == _WM_DESTROY:

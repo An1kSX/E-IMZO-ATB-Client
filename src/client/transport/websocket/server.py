@@ -14,6 +14,7 @@ from client.system.certificates import build_websocket_server_ssl_context
 from client.transport.websocket.messages import parse_proxy_command
 
 LOGGER = logging.getLogger(__name__)
+_USER_ACTION_LOG_EXTRA = {"user_action": True}
 
 
 class WebSocketProxyServer:
@@ -74,16 +75,10 @@ class WebSocketProxyServer:
                 request_path,
                 origin,
                 remote_address,
+                extra=_USER_ACTION_LOG_EXTRA,
             )
             await websocket.close(code=1008, reason="Unexpected WebSocket path")
             return
-
-        LOGGER.info(
-            "Accepted local WSS connection: path=%s origin=%s remote=%s",
-            request_path,
-            origin,
-            remote_address,
-        )
 
         try:
             async for raw_message in websocket:
@@ -121,17 +116,10 @@ class WebSocketProxyServer:
                 origin,
                 request_path,
                 remote_address,
+                extra=_USER_ACTION_LOG_EXTRA,
             )
             response = await self._endpoint_proxy.forward(command)
             await websocket.send(response.to_websocket_payload())
-            LOGGER.info(
-                "Sent WSS response: command=%s origin=%s path=%s remote=%s content_type=%s",
-                command_label,
-                origin,
-                request_path,
-                remote_address,
-                response.content_type,
-            )
         except Exception:
             LOGGER.exception(
                 "Failed to process local WSS message: origin=%s path=%s remote=%s",

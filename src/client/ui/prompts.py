@@ -101,32 +101,10 @@ def _show_confirmation_dialog(*, command_label: str, identity: str) -> bool:
 
             ttk.Label(
                 container,
-                text="Сайт запросил чувствительную операцию с передачей ИНН/ПИНФЛ.",
+                text="Данное действие вызывает автоматический ввод пароля. Подтвердите, что хотите продолжить",
                 wraplength=360,
                 justify="left",
             ).grid(row=0, column=0, sticky="w")
-            ttk.Label(
-                container,
-                text="Операция:",
-                padding=(0, 12, 0, 0),
-            ).grid(row=1, column=0, sticky="w")
-            ttk.Label(
-                container,
-                text=command_label,
-                wraplength=360,
-                justify="left",
-            ).grid(row=2, column=0, sticky="w")
-            ttk.Label(
-                container,
-                text="ИНН/ПИНФЛ:",
-                padding=(0, 12, 0, 0),
-            ).grid(row=3, column=0, sticky="w")
-            ttk.Label(
-                container,
-                text=identity,
-                wraplength=360,
-                justify="left",
-            ).grid(row=4, column=0, sticky="w")
 
             return container
 
@@ -274,7 +252,7 @@ def _show_api_base_url_dialog(
             ).grid(row=0, column=0, sticky="w")
             ttk.Label(
                 container,
-                text="Пример: http://127.0.0.1:64646",
+                text="Пример: http://172.16.10.66:7000",
                 padding=(0, 8, 0, 0),
             ).grid(row=1, column=0, sticky="w")
 

@@ -39,6 +39,7 @@ _IDENTITY_ARGUMENT_KEY_ID_INDEXES: dict[tuple[str | None, str], int] = {
     (_PFX_PLUGIN_NAME, _CHANGE_PASSWORD_COMMAND_NAME): 0,
 }
 LOGGER = logging.getLogger(__name__)
+_USER_ACTION_LOG_EXTRA = {"user_action": True}
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +143,7 @@ class EimzoApiClient:
                     "User cancelled sensitive operation %s for identity %s",
                     command_label,
                     prepared_request.sensitive_identity,
+                    extra=_USER_ACTION_LOG_EXTRA,
                 )
                 return _cancelled_proxy_response()
 
@@ -276,7 +278,7 @@ class EimzoApiClient:
                     error_message=error_message,
                 )
                 if password is None:
-                    LOGGER.info("User cancelled E-IMZO login prompt.")
+                    LOGGER.info("User cancelled E-IMZO login prompt.", extra=_USER_ACTION_LOG_EXTRA)
                     return None
 
                 access_token = await self._login(account_name=self._account_name, password=password)
@@ -304,6 +306,7 @@ class EimzoApiClient:
                 "E-IMZO login was rejected with %s %s",
                 response.status,
                 response.reason,
+                extra=_USER_ACTION_LOG_EXTRA,
             )
             return None
 

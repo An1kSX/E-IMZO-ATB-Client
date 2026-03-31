@@ -9,6 +9,13 @@ _LOG_FILE_BACKUP_COUNT = 50
 _LOGGER = logging.getLogger(__name__)
 
 
+class _ApplicationLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        is_application_log = record.name.startswith("client.")
+        is_user_action = bool(getattr(record, "user_action", False))
+        return is_application_log and (record.levelno >= logging.ERROR or is_user_action)
+
+
 def configure_logging(
     level: str,
     *,
@@ -28,6 +35,7 @@ def configure_logging(
     console_handler = logging.StreamHandler()
     console_handler.setLevel(normalized_level)
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(_ApplicationLogFilter())
     root_logger.addHandler(console_handler)
 
     effective_log_dir = log_dir
@@ -55,8 +63,9 @@ def configure_logging(
             _LOGGER.warning("Could not initialize file logging in %s: %s", candidate_dir, error)
             continue
 
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(_ApplicationLogFilter())
         root_logger.addHandler(file_handler)
         _LOGGER.info("Detailed file logging is enabled at %s", candidate_dir / "eimzo-atb-client.log")
         return
