@@ -94,7 +94,6 @@ def _show_confirmation_dialog(*, command_label: str, identity: str) -> bool:
         def body(self, master: tk.Misc) -> tk.Widget:
             self.resizable(False, False)
             self.attributes("-topmost", True)
-            self.transient(master.winfo_toplevel())
 
             container = ttk.Frame(master, padding=16)
             container.grid(sticky="nsew")
@@ -168,7 +167,6 @@ def _show_password_dialog(
         def body(self, master: tk.Misc) -> tk.Widget:
             self.resizable(False, False)
             self.attributes("-topmost", True)
-            self.transient(master.winfo_toplevel())
 
             container = ttk.Frame(master, padding=16)
             container.grid(sticky="nsew")
@@ -263,7 +261,6 @@ def _show_api_base_url_dialog(
         def body(self, master: tk.Misc) -> tk.Widget:
             self.resizable(False, False)
             self.attributes("-topmost", True)
-            self.transient(master.winfo_toplevel())
 
             container = ttk.Frame(master, padding=16)
             container.grid(sticky="nsew")
