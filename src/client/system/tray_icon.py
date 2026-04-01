@@ -33,6 +33,8 @@ _NOTIFYICON_VERSION_4 = 4
 _MF_STRING = 0x00000000
 _MF_SEPARATOR = 0x00000800
 _TPM_LEFTALIGN = 0x0000
+_TPM_RIGHTALIGN = 0x0008
+_TPM_TOPALIGN = 0x0000
 _TPM_BOTTOMALIGN = 0x0020
 _TPM_RIGHTBUTTON = 0x0002
 _TPM_RETURNCMD = 0x0100
@@ -360,7 +362,7 @@ class WindowsTrayIcon:
             _user32.SetForegroundWindow(hwnd)
             selected_command = _user32.TrackPopupMenu(
                 menu,
-                _TPM_LEFTALIGN | _TPM_BOTTOMALIGN | _TPM_RIGHTBUTTON | _TPM_RETURNCMD,
+                _resolve_menu_alignment_flags(menu_anchor) | _TPM_RIGHTBUTTON | _TPM_RETURNCMD,
                 menu_anchor.x,
                 menu_anchor.y,
                 0,
@@ -466,6 +468,24 @@ def _current_cursor_position() -> _POINT:
     if not _user32.GetCursorPos(ctypes.byref(point)):
         raise ctypes.WinError(ctypes.get_last_error())
     return point
+
+
+def _resolve_menu_alignment_flags(anchor: _POINT) -> int:
+    screen_left = _user32.GetSystemMetrics(76)
+    screen_top = _user32.GetSystemMetrics(77)
+    screen_width = _user32.GetSystemMetrics(78)
+    screen_height = _user32.GetSystemMetrics(79)
+
+    horizontal_flag = _TPM_LEFTALIGN
+    vertical_flag = _TPM_TOPALIGN
+
+    if screen_width > 0 and anchor.x >= screen_left + (screen_width // 2):
+        horizontal_flag = _TPM_RIGHTALIGN
+
+    if screen_height > 0 and anchor.y >= screen_top + (screen_height // 2):
+        vertical_flag = _TPM_BOTTOMALIGN
+
+    return horizontal_flag | vertical_flag
 
 
 def _resolve_tray_event(w_param: int, l_param: int) -> tuple[int, _POINT | None]:
