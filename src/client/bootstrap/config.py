@@ -166,12 +166,53 @@ def _resolve_api_eimzo_url(
         except ConfigurationError:
             pass
 
-    current_value = settings.api_eimzo_url
+    normalized_url = _prompt_and_persist_api_eimzo_url(
+        runtime_dir=runtime_dir,
+        current_value=settings.api_eimzo_url,
+        settings_store=settings_store,
+        prompt_api_url=prompt_api_url,
+    )
+    if normalized_url is None:
+        raise ConfigurationError("API_EIMZO_URL is required.")
+    return normalized_url
+
+
+def _prompt_api_url(initial_value: str | None, error_message: str | None) -> str | None:
+    return prompt_api_base_url(initial_value=initial_value, error_message=error_message)
+
+
+def prompt_and_save_api_eimzo_url(
+    *,
+    runtime_dir: Path,
+    prompt_api_url: Callable[[str | None, str | None], str | None] | None = None,
+) -> str | None:
+    settings_store = AppSettingsStore(runtime_dir)
+    settings = settings_store.load()
+    return _prompt_and_persist_api_eimzo_url(
+        runtime_dir=runtime_dir,
+        current_value=settings.api_eimzo_url,
+        settings_store=settings_store,
+        prompt_api_url=prompt_api_url or _prompt_api_url,
+    )
+
+
+def clear_saved_api_eimzo_url(*, runtime_dir: Path) -> None:
+    AppSettingsStore(runtime_dir).save(AppSettings())
+    LOGGER.info("Cleared saved E-IMZO API URL from app settings.")
+
+
+def _prompt_and_persist_api_eimzo_url(
+    *,
+    runtime_dir: Path,
+    current_value: str | None,
+    settings_store: AppSettingsStore,
+    prompt_api_url: Callable[[str | None, str | None], str | None],
+) -> str | None:
     error_message: str | None = None
     while True:
         prompt_value = prompt_api_url(current_value, error_message)
         if not prompt_value:
-            raise ConfigurationError("API_EIMZO_URL is required.")
+            return None
 
         try:
             normalized_url = _normalize_api_base_url(prompt_value, source="UI input")
@@ -184,10 +225,6 @@ def _resolve_api_eimzo_url(
         settings_store.save(AppSettings(api_eimzo_url=normalized_url))
         LOGGER.info("Saved E-IMZO API URL from UI input to app settings: %s", normalized_url)
         return normalized_url
-
-
-def _prompt_api_url(initial_value: str | None, error_message: str | None) -> str | None:
-    return prompt_api_base_url(initial_value=initial_value, error_message=error_message)
 
 
 def _require_env(name: str) -> str:

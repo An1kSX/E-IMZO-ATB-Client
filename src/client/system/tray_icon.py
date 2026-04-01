@@ -14,6 +14,7 @@ _USER_ACTION_LOG_EXTRA = {"user_action": True}
 _WM_CLOSE = 0x0010
 _WM_DESTROY = 0x0002
 _WM_NULL = 0x0000
+_WM_LBUTTONUP = 0x0202
 _WM_RBUTTONDOWN = 0x0204
 _WM_RBUTTONUP = 0x0205
 _WM_CONTEXTMENU = 0x007B
@@ -30,13 +31,19 @@ _NIF_TIP = 0x00000004
 _NOTIFYICON_VERSION_4 = 4
 
 _MF_STRING = 0x00000000
+_MF_SEPARATOR = 0x00000800
 _TPM_LEFTALIGN = 0x0000
 _TPM_BOTTOMALIGN = 0x0020
 _TPM_RIGHTBUTTON = 0x0002
 _TPM_RETURNCMD = 0x0100
 
 _IDI_APPLICATION = 32512
-_EXIT_MENU_ITEM_ID = 1001
+_CONFIGURE_API_URL_MENU_ITEM_ID = 1001
+_RESET_API_URL_MENU_ITEM_ID = 1002
+_EXIT_MENU_ITEM_ID = 1003
+_CONFIGURE_API_URL_MENU_TEXT = "Настроить URL E-IMZO API..."
+_RESET_API_URL_MENU_TEXT = "Сбросить сохраненный URL"
+_EXIT_MENU_TEXT = "Выход"
 _TOOLTIP_TEXT = "E-IMZO ATB Client"
 _WINDOW_CLASS_NAME = "EimzoAtbClientTrayWindow"
 _IMAGE_ICON = 1
@@ -126,9 +133,13 @@ class WindowsTrayIcon:
         self,
         *,
         on_exit_request: Callable[[], None],
+        on_configure_api_url_request: Callable[[], None] | None = None,
+        on_reset_api_url_request: Callable[[], None] | None = None,
         icon_path: Path | None = None,
     ) -> None:
         self._on_exit_request = on_exit_request
+        self._on_configure_api_url_request = on_configure_api_url_request
+        self._on_reset_api_url_request = on_reset_api_url_request
         self._icon_path = icon_path
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
@@ -298,6 +309,88 @@ class WindowsTrayIcon:
         if hwnd:
             _user32.DestroyWindow(hwnd)
 
+    def _request_configure_api_url(self, *, reason: str) -> None:
+        self._invoke_menu_callback(
+            self._on_configure_api_url_request,
+            action_label="API URL configuration",
+            reason=reason,
+        )
+
+    def _request_reset_api_url(self, *, reason: str) -> None:
+        self._invoke_menu_callback(
+            self._on_reset_api_url_request,
+            action_label="API URL reset",
+            reason=reason,
+        )
+
+    def _invoke_menu_callback(
+        self,
+        callback: Callable[[], None] | None,
+        *,
+        action_label: str,
+        reason: str,
+    ) -> None:
+        if self._shutdown_requested or callback is None:
+            return
+
+        LOGGER.info("%s requested from tray icon: %s", action_label, reason, extra=_USER_ACTION_LOG_EXTRA)
+        try:
+            callback()
+        except Exception:
+            LOGGER.exception("Tray menu action failed: %s", reason)
+
+    def _show_context_menu(self, hwnd: int, *, anchor: _POINT | None = None) -> None:
+        menu = _user32.CreatePopupMenu()
+        if not menu:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        try:
+            has_config_actions = False
+            if self._on_configure_api_url_request is not None:
+                _append_menu_item(menu, _MF_STRING, _CONFIGURE_API_URL_MENU_ITEM_ID, _CONFIGURE_API_URL_MENU_TEXT)
+                has_config_actions = True
+            if self._on_reset_api_url_request is not None:
+                _append_menu_item(menu, _MF_STRING, _RESET_API_URL_MENU_ITEM_ID, _RESET_API_URL_MENU_TEXT)
+                has_config_actions = True
+            if has_config_actions:
+                _append_menu_item(menu, _MF_SEPARATOR, 0, None)
+            _append_menu_item(menu, _MF_STRING, _EXIT_MENU_ITEM_ID, _EXIT_MENU_TEXT)
+
+            menu_anchor = anchor or _current_cursor_position()
+            _user32.SetForegroundWindow(hwnd)
+            selected_command = _user32.TrackPopupMenu(
+                menu,
+                _TPM_LEFTALIGN | _TPM_BOTTOMALIGN | _TPM_RIGHTBUTTON | _TPM_RETURNCMD,
+                menu_anchor.x,
+                menu_anchor.y,
+                0,
+                hwnd,
+                None,
+            )
+            if selected_command:
+                self._handle_menu_command(hwnd, selected_command)
+            _user32.PostMessageW(hwnd, _WM_NULL, 0, 0)
+        finally:
+            _user32.DestroyMenu(menu)
+
+    def _handle_menu_command(self, hwnd: int, command_id: int) -> None:
+        if command_id == _CONFIGURE_API_URL_MENU_ITEM_ID:
+            self._request_configure_api_url(reason="tray-menu-configure-api-url")
+            return
+
+        if command_id == _RESET_API_URL_MENU_ITEM_ID:
+            self._request_reset_api_url(reason="tray-menu-reset-api-url")
+            return
+
+        if command_id == _EXIT_MENU_ITEM_ID:
+            self._request_shutdown(hwnd, reason="tray-menu-exit")
+
+    def _show_context_menu_safely(self, hwnd: int, *, anchor: _POINT | None = None, reason: str) -> None:
+        try:
+            self._show_context_menu(hwnd, anchor=anchor)
+        except Exception:
+            LOGGER.exception("Failed to show tray menu: %s", reason)
+
     def _wnd_proc(
         self,
         hwnd: int,
@@ -314,8 +407,12 @@ class WindowsTrayIcon:
                 l_param,
                 None if anchor is None else f"({anchor.x}, {anchor.y})",
             )
-            if event_code in {_WM_RBUTTONDOWN, _WM_RBUTTONUP, _WM_CONTEXTMENU}:
-                self._request_shutdown(hwnd, reason=f"tray-event:{event_code:#x}")
+            if event_code in {_WM_LBUTTONUP, _WM_RBUTTONUP, _WM_CONTEXTMENU}:
+                self._show_context_menu_safely(
+                    hwnd,
+                    anchor=anchor,
+                    reason=f"tray-event:{event_code:#x}",
+                )
                 return 0
 
         if message == _WM_CONTEXTMENU:
@@ -325,7 +422,7 @@ class WindowsTrayIcon:
                 w_param,
                 l_param,
             )
-            self._request_shutdown(hwnd, reason="window-context-menu")
+            self._show_context_menu_safely(hwnd, reason="window-context-menu")
             return 0
 
         if message == _WM_DESTROY:
@@ -338,6 +435,11 @@ class WindowsTrayIcon:
 
 def _make_int_resource(value: int) -> wintypes.LPCWSTR:
     return ctypes.cast(ctypes.c_void_p(value & 0xFFFF), wintypes.LPCWSTR)
+
+
+def _append_menu_item(menu: int, flags: int, item_id: int, text: str | None) -> None:
+    if not _user32.AppendMenuW(menu, flags, item_id, text):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def _low_word(value: int) -> int:
@@ -357,6 +459,13 @@ def _notification_anchor_point(w_param: int) -> _POINT:
         x=_signed_word(_low_word(w_param)),
         y=_signed_word(_high_word(w_param)),
     )
+
+
+def _current_cursor_position() -> _POINT:
+    point = _POINT()
+    if not _user32.GetCursorPos(ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return point
 
 
 def _resolve_tray_event(w_param: int, l_param: int) -> tuple[int, _POINT | None]:

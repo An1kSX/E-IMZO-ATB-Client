@@ -81,6 +81,10 @@ def prompt_api_base_url(
     return _show_api_base_url_dialog(initial_value=initial_value, error_message=error_message)
 
 
+def show_info_message(*, title: str, message: str) -> None:
+    _show_info_dialog(title=title, message=message)
+
+
 def _show_confirmation_dialog(*, command_label: str, identity: str) -> bool:
     import tkinter as tk
     from tkinter import simpledialog
@@ -304,6 +308,20 @@ def _show_api_base_url_dialog(
             self.result = self._url_var.get().strip()
 
     return _run_dialog(dialog_factory=ApiBaseUrlDialog)
+
+
+def _show_info_dialog(*, title: str, message: str) -> None:
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+
+    try:
+        messagebox.showinfo(title=title, message=message, parent=root)
+    finally:
+        root.destroy()
 
 
 def _run_dialog(dialog_factory: type) -> bool | str | None:

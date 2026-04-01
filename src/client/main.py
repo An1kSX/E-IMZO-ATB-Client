@@ -4,13 +4,20 @@ import asyncio
 import os
 import logging
 import platform
+from pathlib import Path
 
 from client.app import run_app
-from client.bootstrap.config import AppConfig, ConfigurationError
+from client.bootstrap.config import (
+    AppConfig,
+    ConfigurationError,
+    clear_saved_api_eimzo_url,
+    prompt_and_save_api_eimzo_url,
+)
 from client.bootstrap.logging import configure_logging
 from client.system.app_icon import resolve_app_icon_path
 from client.system.autostart import sync_windows_auto_start
 from client.system.tray_icon import WindowsTrayIcon
+from client.ui import show_info_message
 
 _TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
@@ -50,6 +57,8 @@ async def _run_with_system_tray(config: AppConfig) -> None:
     shutdown_event = asyncio.Event()
     tray_icon = WindowsTrayIcon(
         on_exit_request=lambda: loop.call_soon_threadsafe(shutdown_event.set),
+        on_configure_api_url_request=lambda: _configure_saved_api_url(config.runtime_dir),
+        on_reset_api_url_request=lambda: _reset_saved_api_url(config.runtime_dir),
         icon_path=resolve_app_icon_path(),
     )
     app_task = asyncio.create_task(run_app(config), name="run-app")
@@ -112,6 +121,40 @@ def _install_windows_event_loop() -> None:
 
 def _force_process_exit(code: int) -> None:
     os._exit(code)
+
+
+def _configure_saved_api_url(runtime_dir: Path) -> None:
+    api_url = prompt_and_save_api_eimzo_url(runtime_dir=runtime_dir)
+    if api_url is None:
+        return
+
+    show_info_message(
+        title="Настройка сохранена",
+        message=_build_saved_url_message(
+            body=f"Новый URL E-IMZO API сохранен:\n{api_url}",
+        ),
+    )
+
+
+def _reset_saved_api_url(runtime_dir: Path) -> None:
+    clear_saved_api_eimzo_url(runtime_dir=runtime_dir)
+    show_info_message(
+        title="Настройка сброшена",
+        message=_build_saved_url_message(
+            body="Сохраненный URL E-IMZO API удален.",
+        ),
+    )
+
+
+def _build_saved_url_message(*, body: str) -> str:
+    if os.getenv("API_EIMZO_URL"):
+        return (
+            f"{body}\n\n"
+            "Сейчас приложение использует значение API_EIMZO_URL из переменных среды. "
+            "Сохраненный URL начнет работать после удаления этой переменной."
+        )
+
+    return f"{body}\n\nПерезапустите приложение, чтобы применить изменения."
 
 
 if __name__ == "__main__":
