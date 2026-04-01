@@ -15,6 +15,10 @@ from client.transport.websocket.messages import parse_proxy_command
 
 LOGGER = logging.getLogger(__name__)
 _USER_ACTION_LOG_EXTRA = {"user_action": True}
+_CLOSE_CODE_GOING_AWAY = 1001
+_CLOSE_CODE_POLICY_VIOLATION = 1008
+_SERVER_RELOAD_CLOSE_REASON = "Server certificate reloaded"
+_UNEXPECTED_PATH_CLOSE_REASON = "Unexpected WebSocket path"
 
 
 class WebSocketProxyServer:
@@ -60,10 +64,12 @@ class WebSocketProxyServer:
             ssl=ssl_context,
             ping_interval=self._config.ws_ping_interval_seconds,
             ping_timeout=self._config.ws_ping_timeout_seconds,
-        ):
+        ) as server:
             LOGGER.info("Local WSS server is listening on %s", self._config.websocket_bind_url())
             await self._certificate_rotation_event.wait()
             LOGGER.info("Reloading local WSS server to apply renewed certificate.")
+            server.close(code=_CLOSE_CODE_GOING_AWAY, reason=_SERVER_RELOAD_CLOSE_REASON)
+            await server.wait_closed()
 
     async def _handle_connection(self, websocket: Any, path: str | None = None) -> None:
         request_path = self._resolve_request_path(websocket, path)
@@ -77,7 +83,10 @@ class WebSocketProxyServer:
                 remote_address,
                 extra=_USER_ACTION_LOG_EXTRA,
             )
-            await websocket.close(code=1008, reason="Unexpected WebSocket path")
+            await websocket.close(
+                code=_CLOSE_CODE_POLICY_VIOLATION,
+                reason=_UNEXPECTED_PATH_CLOSE_REASON,
+            )
             return
 
         try:
@@ -89,12 +98,14 @@ class WebSocketProxyServer:
                     origin=origin,
                     remote_address=remote_address,
                 )
-        except ConnectionClosed:
+        except ConnectionClosed as error:
             LOGGER.info(
-                "Local WSS connection closed: path=%s origin=%s remote=%s",
+                "Local WSS connection closed: path=%s origin=%s remote=%s received_close=%s sent_close=%s",
                 request_path,
                 origin,
                 remote_address,
+                _format_close_frame(getattr(error, "rcvd", None)),
+                _format_close_frame(getattr(error, "sent", None)),
             )
 
     async def _handle_message(
@@ -185,3 +196,14 @@ def _format_command_label(plugin: str | None, name: str) -> str:
     if plugin:
         return f"{plugin}/{name}"
     return name
+
+
+def _format_close_frame(close_frame: Any | None) -> str:
+    if close_frame is None:
+        return "none"
+
+    code = getattr(close_frame, "code", None)
+    reason = getattr(close_frame, "reason", "")
+    if reason:
+        return f"{code}:{reason}"
+    return str(code)
