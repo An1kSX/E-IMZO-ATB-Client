@@ -344,57 +344,12 @@ class WindowsTrayIcon:
             LOGGER.exception("Tray menu action failed: %s", reason)
 
     def _show_context_menu(self, hwnd: int, *, anchor: _POINT | None = None) -> None:
-        menu = _user32.CreatePopupMenu()
-        if not menu:
-            raise ctypes.WinError(ctypes.get_last_error())
-
-        try:
-            menu_text_buffers: list[ctypes.Array[ctypes.c_wchar]] = []
-            has_config_actions = False
-            if self._on_configure_api_url_request is not None:
-                _append_menu_item(
-                    menu,
-                    _MF_STRING,
-                    _CONFIGURE_API_URL_MENU_ITEM_ID,
-                    _CONFIGURE_API_URL_MENU_TEXT,
-                    text_buffers=menu_text_buffers,
-                )
-                has_config_actions = True
-            if self._on_reset_api_url_request is not None:
-                _append_menu_item(
-                    menu,
-                    _MF_STRING,
-                    _RESET_API_URL_MENU_ITEM_ID,
-                    _RESET_API_URL_MENU_TEXT,
-                    text_buffers=menu_text_buffers,
-                )
-                has_config_actions = True
-            if has_config_actions:
-                _append_menu_item(menu, _MF_SEPARATOR, 0, None, text_buffers=menu_text_buffers)
-            _append_menu_item(
-                menu,
-                _MF_STRING,
-                _EXIT_MENU_ITEM_ID,
-                _EXIT_MENU_TEXT,
-                text_buffers=menu_text_buffers,
-            )
-
-            menu_anchor = _screen_center_point()
-            _user32.SetForegroundWindow(hwnd)
-            selected_command = _user32.TrackPopupMenu(
-                menu,
-                _TPM_CENTERALIGN | _TPM_VCENTERALIGN | _TPM_RIGHTBUTTON | _TPM_RETURNCMD,
-                menu_anchor.x,
-                menu_anchor.y,
-                0,
-                hwnd,
-                None,
-            )
-            if selected_command:
-                self._handle_menu_command(hwnd, selected_command)
-            _user32.PostMessageW(hwnd, _WM_NULL, 0, 0)
-        finally:
-            _user32.DestroyMenu(menu)
+        selected_command = _show_tray_menu_dialog(
+            show_configure_api_url=self._on_configure_api_url_request is not None,
+            show_reset_api_url=self._on_reset_api_url_request is not None,
+        )
+        if selected_command:
+            self._handle_menu_command(hwnd, selected_command)
 
     def _handle_menu_command(self, hwnd: int, command_id: int) -> None:
         if command_id == _CONFIGURE_API_URL_MENU_ITEM_ID:
@@ -460,24 +415,6 @@ def _make_int_resource(value: int) -> wintypes.LPCWSTR:
     return ctypes.cast(ctypes.c_void_p(value & 0xFFFF), wintypes.LPCWSTR)
 
 
-def _append_menu_item(
-    menu: int,
-    flags: int,
-    item_id: int,
-    text: str | None,
-    *,
-    text_buffers: list[ctypes.Array[ctypes.c_wchar]],
-) -> None:
-    text_pointer = None
-    if text is not None:
-        text_buffer = ctypes.create_unicode_buffer(text)
-        text_buffers.append(text_buffer)
-        text_pointer = text_buffer
-
-    if not _user32.AppendMenuW(menu, flags, item_id, text_pointer):
-        raise ctypes.WinError(ctypes.get_last_error())
-
-
 def _low_word(value: int) -> int:
     return value & 0xFFFF
 
@@ -497,22 +434,91 @@ def _notification_anchor_point(w_param: int) -> _POINT:
     )
 
 
-def _current_cursor_position() -> _POINT:
-    point = _POINT()
-    if not _user32.GetCursorPos(ctypes.byref(point)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return point
+def _show_tray_menu_dialog(
+    *,
+    show_configure_api_url: bool,
+    show_reset_api_url: bool,
+) -> int | None:
+    import tkinter as tk
+    from tkinter import ttk
 
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
 
-def _screen_center_point() -> _POINT:
-    screen_left = _user32.GetSystemMetrics(76)
-    screen_top = _user32.GetSystemMetrics(77)
-    screen_width = _user32.GetSystemMetrics(78)
-    screen_height = _user32.GetSystemMetrics(79)
-    return _POINT(
-        x=screen_left + (screen_width // 2),
-        y=screen_top + (screen_height // 2),
-    )
+    selected_command: int | None = None
+    dialog = tk.Toplevel(root)
+    dialog.title(_TOOLTIP_TEXT)
+    dialog.resizable(False, False)
+    dialog.attributes("-topmost", True)
+
+    container = ttk.Frame(dialog, padding=16)
+    container.grid(sticky="nsew")
+    container.columnconfigure(0, weight=1)
+
+    ttk.Label(
+        container,
+        text="Действия",
+        justify="center",
+    ).grid(row=0, column=0, sticky="ew")
+
+    row_index = 1
+
+    def choose(command_id: int) -> None:
+        nonlocal selected_command
+        selected_command = command_id
+        dialog.destroy()
+
+    if show_configure_api_url:
+        ttk.Button(
+            container,
+            text=_CONFIGURE_API_URL_MENU_TEXT,
+            command=lambda: choose(_CONFIGURE_API_URL_MENU_ITEM_ID),
+            width=30,
+        ).grid(row=row_index, column=0, sticky="ew", pady=(12, 0))
+        row_index += 1
+
+    if show_reset_api_url:
+        ttk.Button(
+            container,
+            text=_RESET_API_URL_MENU_TEXT,
+            command=lambda: choose(_RESET_API_URL_MENU_ITEM_ID),
+            width=30,
+        ).grid(row=row_index, column=0, sticky="ew", pady=(8, 0))
+        row_index += 1
+
+    ttk.Separator(container, orient="horizontal").grid(row=row_index, column=0, sticky="ew", pady=(12, 0))
+    row_index += 1
+
+    ttk.Button(
+        container,
+        text=_EXIT_MENU_TEXT,
+        command=lambda: choose(_EXIT_MENU_ITEM_ID),
+        width=30,
+    ).grid(row=row_index, column=0, sticky="ew", pady=(12, 0))
+
+    dialog.bind("<Escape>", lambda event: dialog.destroy())
+    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+    dialog.update_idletasks()
+
+    dialog_width = dialog.winfo_width()
+    dialog_height = dialog.winfo_height()
+    screen_width = dialog.winfo_screenwidth()
+    screen_height = dialog.winfo_screenheight()
+    position_x = max(0, (screen_width - dialog_width) // 2)
+    position_y = max(0, (screen_height - dialog_height) // 2)
+    dialog.geometry(f"+{position_x}+{position_y}")
+
+    dialog.deiconify()
+    dialog.lift()
+    dialog.focus_force()
+    dialog.grab_set()
+
+    try:
+        dialog.wait_window()
+        return selected_command
+    finally:
+        root.destroy()
 
 
 def _resolve_tray_event(w_param: int, l_param: int) -> tuple[int, _POINT | None]:
