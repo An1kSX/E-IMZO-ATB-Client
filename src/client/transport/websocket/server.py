@@ -15,8 +15,10 @@ from client.transport.websocket.messages import parse_proxy_command
 
 LOGGER = logging.getLogger(__name__)
 _USER_ACTION_LOG_EXTRA = {"user_action": True}
+_CLOSE_CODE_NORMAL_CLOSURE = 1000
 _CLOSE_CODE_GOING_AWAY = 1001
 _CLOSE_CODE_POLICY_VIOLATION = 1008
+_REQUEST_COMPLETED_CLOSE_REASON = "Request completed"
 _SERVER_RELOAD_CLOSE_REASON = "Server certificate reloaded"
 _UNEXPECTED_PATH_CLOSE_REASON = "Unexpected WebSocket path"
 
@@ -98,6 +100,7 @@ class WebSocketProxyServer:
                     origin=origin,
                     remote_address=remote_address,
                 )
+                return
         except ConnectionClosed as error:
             LOGGER.info(
                 "Local WSS connection closed: path=%s origin=%s remote=%s received_close=%s sent_close=%s",
@@ -131,6 +134,10 @@ class WebSocketProxyServer:
             )
             response = await self._endpoint_proxy.forward(command)
             await websocket.send(response.to_websocket_payload())
+            await websocket.close(
+                code=_CLOSE_CODE_NORMAL_CLOSURE,
+                reason=_REQUEST_COMPLETED_CLOSE_REASON,
+            )
         except Exception:
             LOGGER.exception(
                 "Failed to process local WSS message: origin=%s path=%s remote=%s",
