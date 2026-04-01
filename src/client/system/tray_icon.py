@@ -349,16 +349,35 @@ class WindowsTrayIcon:
             raise ctypes.WinError(ctypes.get_last_error())
 
         try:
+            menu_text_buffers: list[ctypes.Array[ctypes.c_wchar]] = []
             has_config_actions = False
             if self._on_configure_api_url_request is not None:
-                _append_menu_item(menu, _MF_STRING, _CONFIGURE_API_URL_MENU_ITEM_ID, _CONFIGURE_API_URL_MENU_TEXT)
+                _append_menu_item(
+                    menu,
+                    _MF_STRING,
+                    _CONFIGURE_API_URL_MENU_ITEM_ID,
+                    _CONFIGURE_API_URL_MENU_TEXT,
+                    text_buffers=menu_text_buffers,
+                )
                 has_config_actions = True
             if self._on_reset_api_url_request is not None:
-                _append_menu_item(menu, _MF_STRING, _RESET_API_URL_MENU_ITEM_ID, _RESET_API_URL_MENU_TEXT)
+                _append_menu_item(
+                    menu,
+                    _MF_STRING,
+                    _RESET_API_URL_MENU_ITEM_ID,
+                    _RESET_API_URL_MENU_TEXT,
+                    text_buffers=menu_text_buffers,
+                )
                 has_config_actions = True
             if has_config_actions:
-                _append_menu_item(menu, _MF_SEPARATOR, 0, None)
-            _append_menu_item(menu, _MF_STRING, _EXIT_MENU_ITEM_ID, _EXIT_MENU_TEXT)
+                _append_menu_item(menu, _MF_SEPARATOR, 0, None, text_buffers=menu_text_buffers)
+            _append_menu_item(
+                menu,
+                _MF_STRING,
+                _EXIT_MENU_ITEM_ID,
+                _EXIT_MENU_TEXT,
+                text_buffers=menu_text_buffers,
+            )
 
             menu_anchor = _screen_center_point()
             _user32.SetForegroundWindow(hwnd)
@@ -441,8 +460,21 @@ def _make_int_resource(value: int) -> wintypes.LPCWSTR:
     return ctypes.cast(ctypes.c_void_p(value & 0xFFFF), wintypes.LPCWSTR)
 
 
-def _append_menu_item(menu: int, flags: int, item_id: int, text: str | None) -> None:
-    if not _user32.AppendMenuW(menu, flags, item_id, text):
+def _append_menu_item(
+    menu: int,
+    flags: int,
+    item_id: int,
+    text: str | None,
+    *,
+    text_buffers: list[ctypes.Array[ctypes.c_wchar]],
+) -> None:
+    text_pointer = None
+    if text is not None:
+        text_buffer = ctypes.create_unicode_buffer(text)
+        text_buffers.append(text_buffer)
+        text_pointer = text_buffer
+
+    if not _user32.AppendMenuW(menu, flags, item_id, text_pointer):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
