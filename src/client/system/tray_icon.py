@@ -467,7 +467,16 @@ def _show_tray_menu_dialog(
     def choose(command_id: int) -> None:
         nonlocal selected_command
         selected_command = command_id
-        dialog.destroy()
+        _close_dialog()
+
+    def _close_dialog() -> None:
+        try:
+            dialog.grab_release()
+        except Exception:
+            pass
+        if dialog.winfo_exists():
+            dialog.withdraw()
+            dialog.destroy()
 
     if show_configure_api_url:
         ttk.Button(
@@ -497,8 +506,8 @@ def _show_tray_menu_dialog(
         width=30,
     ).grid(row=row_index, column=0, sticky="ew", pady=(12, 0))
 
-    dialog.bind("<Escape>", lambda event: dialog.destroy())
-    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+    dialog.bind("<Escape>", lambda event: _close_dialog())
+    dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
     dialog.update_idletasks()
 
     dialog_width = dialog.winfo_width()
