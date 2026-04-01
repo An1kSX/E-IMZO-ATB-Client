@@ -155,6 +155,8 @@ class WindowsTrayIcon:
         self._icon_handle: int | None = None
         self._owns_icon_handle = False
         self._shutdown_requested = False
+        self._menu_thread: threading.Thread | None = None
+        self._menu_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread is not None:
@@ -311,7 +313,7 @@ class WindowsTrayIcon:
         LOGGER.info("Shutdown requested from tray icon: %s", reason, extra=_USER_ACTION_LOG_EXTRA)
         self._on_exit_request()
         if hwnd:
-            _user32.DestroyWindow(hwnd)
+            _user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
 
     def _request_configure_api_url(self, *, reason: str) -> None:
         self._invoke_menu_callback(
@@ -344,12 +346,29 @@ class WindowsTrayIcon:
             LOGGER.exception("Tray menu action failed: %s", reason)
 
     def _show_context_menu(self, hwnd: int, *, anchor: _POINT | None = None) -> None:
-        selected_command = _show_tray_menu_dialog(
-            show_configure_api_url=self._on_configure_api_url_request is not None,
-            show_reset_api_url=self._on_reset_api_url_request is not None,
-        )
-        if selected_command:
-            self._handle_menu_command(hwnd, selected_command)
+        with self._menu_lock:
+            if self._menu_thread is not None and self._menu_thread.is_alive():
+                return
+
+            self._menu_thread = threading.Thread(
+                target=self._run_context_menu_dialog,
+                args=(hwnd,),
+                name="eimzo-tray-menu",
+                daemon=True,
+            )
+            self._menu_thread.start()
+
+    def _run_context_menu_dialog(self, hwnd: int) -> None:
+        try:
+            selected_command = _show_tray_menu_dialog(
+                show_configure_api_url=self._on_configure_api_url_request is not None,
+                show_reset_api_url=self._on_reset_api_url_request is not None,
+            )
+            if selected_command:
+                self._handle_menu_command(hwnd, selected_command)
+        finally:
+            with self._menu_lock:
+                self._menu_thread = None
 
     def _handle_menu_command(self, hwnd: int, command_id: int) -> None:
         if command_id == _CONFIGURE_API_URL_MENU_ITEM_ID:
