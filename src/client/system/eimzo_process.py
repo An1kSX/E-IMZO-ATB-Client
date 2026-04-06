@@ -20,6 +20,13 @@ class ListeningProcess:
     name: str
 
 
+def is_port_in_use(*, port: int) -> bool:
+    if platform.system() != "Windows":
+        return False
+
+    return _resolve_windows_pid_by_port(port=port) is not None
+
+
 def find_listening_process_by_port(*, port: int) -> ListeningProcess | None:
     if platform.system() != "Windows":
         return None

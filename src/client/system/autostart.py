@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -56,7 +57,14 @@ def disable_windows_run_entries_by_command_fragment(*, fragment: str) -> int:
 
     try:
         removed_count = _delete_windows_run_values_matching(
-            lambda _, command: isinstance(command, str) and normalized_fragment in command.casefold()
+            lambda value_name, command: _matches_startup_fragment(
+                value_name=value_name,
+                command=command,
+                fragments=(normalized_fragment,),
+            )
+        )
+        removed_count += _delete_windows_startup_folder_entries_matching(
+            fragments=(normalized_fragment,),
         )
     except OSError:
         LOGGER.exception("Could not remove Windows auto-start entries for fragment %r.", fragment)
@@ -85,8 +93,14 @@ def disable_windows_run_entries_by_command_fragments(*, fragments: Sequence[str]
 
     try:
         removed_count = _delete_windows_run_values_matching(
-            lambda _, command: isinstance(command, str)
-            and any(fragment in command.casefold() for fragment in normalized_fragments)
+            lambda value_name, command: _matches_startup_fragment(
+                value_name=value_name,
+                command=command,
+                fragments=normalized_fragments,
+            )
+        )
+        removed_count += _delete_windows_startup_folder_entries_matching(
+            fragments=normalized_fragments,
         )
     except OSError:
         LOGGER.exception("Could not remove Windows auto-start entries for fragments %r.", fragments)
@@ -202,6 +216,49 @@ def _delete_windows_run_values_matching(predicate: Callable[[str, object], bool]
             removed_count += 1
 
     return removed_count
+
+
+def _matches_startup_fragment(*, value_name: str, command: object, fragments: Sequence[str]) -> bool:
+    normalized_value_name = value_name.casefold()
+    normalized_command = command.casefold() if isinstance(command, str) else ""
+    return any(
+        fragment in normalized_value_name or fragment in normalized_command
+        for fragment in fragments
+    )
+
+
+def _delete_windows_startup_folder_entries_matching(*, fragments: Sequence[str]) -> int:
+    removed_count = 0
+    for startup_dir in _iter_windows_startup_directories():
+        if not startup_dir.exists():
+            continue
+        for entry in startup_dir.iterdir():
+            if not entry.is_file():
+                continue
+            entry_name = entry.name.casefold()
+            if not any(fragment in entry_name for fragment in fragments):
+                continue
+            try:
+                entry.unlink()
+            except OSError:
+                LOGGER.exception("Could not remove Windows startup entry %s.", entry)
+                continue
+            removed_count += 1
+
+    return removed_count
+
+
+def _iter_windows_startup_directories() -> list[Path]:
+    directories: list[Path] = []
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        directories.append(Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup")
+
+    program_data = os.getenv("ProgramData")
+    if program_data:
+        directories.append(Path(program_data) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "StartUp")
+
+    return directories
 
 
 def _load_winreg():

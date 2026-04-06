@@ -13,6 +13,7 @@ from client.system.certificates import maintain_localhost_certificate, resolve_s
 from client.system.eimzo_process import (
     find_listening_process_by_port,
     is_eimzo_process_name,
+    is_port_in_use,
     terminate_process_by_pid,
 )
 from client.transport.websocket.server import WebSocketPortInUseError, WebSocketProxyServer
@@ -141,12 +142,59 @@ async def _resolve_port_conflict(
             return False
 
         if resolution.remove_from_autostart:
-            disable_windows_run_entries_by_command_fragments(
+            removed_autostart_entries = disable_windows_run_entries_by_command_fragments(
                 fragments=("e-imzo.exe", "javaw.exe", "e-imzo"),
             )
+            if removed_autostart_entries == 0:
+                LOGGER.warning("Could not find E-IMZO auto-start entries to remove.")
+                show_info_message(
+                    title="Автозагрузка E-IMZO не найдена",
+                    message=(
+                        "Не удалось найти запись автозагрузки E-IMZO в стандартных местах Windows.\n\n"
+                        "Возможно, она настроена через другой механизм и её нужно отключить вручную."
+                    ),
+                )
 
         stopped = terminate_process_by_pid(pid=listening_process.pid)
         if stopped:
+            port_released = await _wait_for_port_release(port=config.ws_port)
+            if not port_released:
+                LOGGER.warning(
+                    "Requested E-IMZO shutdown succeeded for PID %s, but WSS port %s is still busy.",
+                    listening_process.pid,
+                    conflict.port,
+                )
+                refreshed_process = find_listening_process_by_port(port=config.ws_port)
+                if refreshed_process is not None and is_eimzo_process_name(refreshed_process.name):
+                    show_info_message(
+                        title="E-IMZO всё ещё запущен",
+                        message=(
+                            f"После попытки закрытия процесс {refreshed_process.name} всё ещё удерживает порт {conflict.port}.\n\n"
+                            "Попробуйте ещё раз или закройте E-IMZO вручную."
+                        ),
+                    )
+                    listening_process = refreshed_process
+                    continue
+
+                if refreshed_process is None:
+                    show_info_message(
+                        title="Порт всё ещё занят",
+                        message=(
+                            f"После закрытия E-IMZO порт {conflict.port} всё ещё не освободился.\n\n"
+                            "Попробуйте запустить клиент ещё раз через несколько секунд."
+                        ),
+                    )
+                else:
+                    show_info_message(
+                        title="Порт всё ещё занят",
+                        message=(
+                            f"После закрытия E-IMZO порт {conflict.port} всё ещё занят процессом "
+                            f"{refreshed_process.name} (PID {refreshed_process.pid}).\n\n"
+                            "Закройте этот процесс и попробуйте снова."
+                        ),
+                    )
+                return False
+
             LOGGER.info(
                 "Terminated %s (PID %s) and will retry WSS startup.",
                 listening_process.name,
@@ -170,3 +218,18 @@ async def _resolve_port_conflict(
         if refreshed_process is None or not is_eimzo_process_name(refreshed_process.name):
             return True
         listening_process = refreshed_process
+
+
+async def _wait_for_port_release(
+    *,
+    port: int,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.25,
+) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        if not is_port_in_use(port=port):
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(poll_interval_seconds)
