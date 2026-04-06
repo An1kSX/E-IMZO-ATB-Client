@@ -18,7 +18,10 @@ from client.system.app_icon import resolve_app_icon_path
 from client.system.autostart import sync_windows_auto_start
 from client.system.single_instance import SingleInstanceLock
 from client.system.tray_icon import WindowsTrayIcon
-from client.system.updates import maybe_start_self_update_from_github_release
+from client.system.updates import (
+    ReleaseInfo,
+    maybe_start_self_update_from_github_release_with_notification,
+)
 from client.ui import show_info_message
 
 _TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -53,7 +56,10 @@ def main() -> None:
         raise SystemExit(0)
 
     try:
-        if maybe_start_self_update_from_github_release(config=config):
+        if maybe_start_self_update_from_github_release_with_notification(
+            config=config,
+            notify_user=_show_auto_update_started_message,
+        ):
             logging.getLogger(__name__).info("Auto-update started. Exiting current process.")
             return
         try:
@@ -82,6 +88,10 @@ async def _run_with_system_tray(config: AppConfig) -> None:
     )
     app_task = asyncio.create_task(run_app(config), name="run-app")
     shutdown_task = asyncio.create_task(shutdown_event.wait(), name="wait-for-tray-exit")
+    auto_update_task = asyncio.create_task(
+        _run_periodic_auto_update_checks(config, shutdown_event),
+        name="periodic-auto-update",
+    )
 
     try:
         try:
@@ -94,9 +104,28 @@ async def _run_with_system_tray(config: AppConfig) -> None:
             return
 
         done, pending = await asyncio.wait(
-            {app_task, shutdown_task},
+            {app_task, shutdown_task, auto_update_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        if auto_update_task in done:
+            update_started = auto_update_task.result()
+            if update_started:
+                logging.getLogger(__name__).info("Stopping application because auto-update was started.")
+                app_task.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(app_task, return_exceptions=True),
+                        timeout=_TRAY_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logging.getLogger(__name__).error(
+                        "Graceful shutdown timed out after %.1f seconds during auto-update. Forcing process exit.",
+                        _TRAY_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+                    tray_icon.stop()
+                    _force_process_exit(0)
+                return
 
         if shutdown_task in done:
             logging.getLogger(__name__).info("Stopping application because of tray exit request.")
@@ -117,11 +146,44 @@ async def _run_with_system_tray(config: AppConfig) -> None:
 
         shutdown_task.cancel()
         await asyncio.gather(shutdown_task, return_exceptions=True)
+        auto_update_task.cancel()
+        await asyncio.gather(auto_update_task, return_exceptions=True)
         await app_task
     finally:
         shutdown_task.cancel()
         await asyncio.gather(shutdown_task, return_exceptions=True)
+        auto_update_task.cancel()
+        await asyncio.gather(auto_update_task, return_exceptions=True)
         tray_icon.stop()
+
+
+async def _run_periodic_auto_update_checks(
+    config: AppConfig,
+    shutdown_event: asyncio.Event,
+) -> bool:
+    if not getattr(config, "auto_update_enabled", True):
+        return False
+
+    check_interval_seconds = max(1.0, float(getattr(config, "auto_update_check_interval_seconds", 600.0)))
+    while not shutdown_event.is_set():
+        try:
+            await asyncio.sleep(check_interval_seconds)
+        except asyncio.CancelledError:
+            raise
+
+        if shutdown_event.is_set():
+            return False
+
+        update_started = await asyncio.to_thread(
+            maybe_start_self_update_from_github_release_with_notification,
+            config=config,
+            notify_user=_show_auto_update_started_message,
+        )
+        if update_started:
+            shutdown_event.set()
+            return True
+
+    return False
 
 
 def _install_windows_event_loop() -> None:
@@ -140,6 +202,16 @@ def _install_windows_event_loop() -> None:
 
 def _force_process_exit(code: int) -> None:
     os._exit(code)
+
+
+def _show_auto_update_started_message(release: ReleaseInfo) -> None:
+    show_info_message(
+        title="Найдено обновление",
+        message=(
+            f"Новая версия {release.tag_name} уже скачана.\n\n"
+            "Сейчас E-IMZO ATB Client будет перезапущен для установки обновления."
+        ),
+    )
 
 
 def _configure_saved_api_url(runtime_dir: Path) -> None:

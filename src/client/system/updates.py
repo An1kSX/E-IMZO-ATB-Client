@@ -9,6 +9,7 @@ import platform
 import re
 import subprocess
 import sys
+from typing import Callable
 import urllib.error
 import urllib.request
 
@@ -28,6 +29,14 @@ class ReleaseInfo:
 
 
 def maybe_start_self_update_from_github_release(*, config: AppConfig) -> bool:
+    return maybe_start_self_update_from_github_release_with_notification(config=config)
+
+
+def maybe_start_self_update_from_github_release_with_notification(
+    *,
+    config: AppConfig,
+    notify_user: Callable[[ReleaseInfo], None] | None = None,
+) -> bool:
     if not _can_self_update(config):
         return False
 
@@ -50,6 +59,12 @@ def maybe_start_self_update_from_github_release(*, config: AppConfig) -> bool:
 
     if not _download_file(url=release.download_url, destination=downloaded_file, timeout_seconds=config.auto_update_check_timeout_seconds):
         return False
+
+    if notify_user is not None:
+        try:
+            notify_user(release)
+        except Exception:
+            LOGGER.exception("Could not show auto-update notification for release %s.", release.tag_name)
 
     _write_updater_script(
         script_path=updater_script,

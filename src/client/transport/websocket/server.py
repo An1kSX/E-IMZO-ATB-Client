@@ -240,8 +240,12 @@ def _is_address_in_use_error(error: OSError) -> bool:
     if winerror == 10048:
         return True
 
-    if error.errno in {48, 98}:
+    if error.errno in {48, 98, 10048}:
         return True
 
     message = str(error).casefold()
-    return "address already in use" in message or "only one usage of each socket address" in message
+    return (
+        "address already in use" in message
+        or "only one usage of each socket address" in message
+        or "одно использование адреса сокета" in message
+    )
