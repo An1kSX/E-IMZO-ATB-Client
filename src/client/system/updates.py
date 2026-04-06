@@ -9,7 +9,8 @@ import platform
 import re
 import subprocess
 import sys
-from typing import Callable
+import time
+from typing import Callable, Literal
 import urllib.error
 import urllib.request
 
@@ -20,6 +21,19 @@ LOGGER = logging.getLogger(__name__)
 _DEFAULT_GITHUB_API = "https://api.github.com"
 _DEFAULT_RELEASE_REPO = "An1kSX/E-IMZO-ATB-Client"
 _USER_AGENT = "eimzo-atb-client-updater"
+_FAILED_UPDATE_RETRY_COOLDOWN_SECONDS = 1800.0
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateNotification:
+    stage: Literal["downloading", "installing"]
+    release: "ReleaseInfo"
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateState:
+    target_version: str
+    started_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,10 +49,14 @@ def maybe_start_self_update_from_github_release(*, config: AppConfig) -> bool:
 def maybe_start_self_update_from_github_release_with_notification(
     *,
     config: AppConfig,
-    notify_user: Callable[[ReleaseInfo], None] | None = None,
+    notify_user: Callable[[UpdateNotification], None] | None = None,
 ) -> bool:
     if not _can_self_update(config):
         return False
+
+    state_file_path = _build_update_state_path(config.runtime_dir)
+    if _clear_update_state_if_applied(state_file_path=state_file_path):
+        LOGGER.info("Cleared pending auto-update state after successful version change.")
 
     release = _fetch_latest_release(
         repo=_DEFAULT_RELEASE_REPO,
@@ -51,29 +69,56 @@ def maybe_start_self_update_from_github_release_with_notification(
     if not _is_newer_version(candidate=release.tag_name, current=__version__):
         return False
 
+    if _should_skip_repeated_failed_update_attempt(
+        state_file_path=state_file_path,
+        release=release,
+        current_version=__version__,
+    ):
+        LOGGER.warning(
+            "Skipping repeated auto-update attempt to %s because a recent install attempt did not complete.",
+            release.tag_name,
+        )
+        return False
+
     current_executable = Path(sys.executable).resolve()
     updates_dir = config.runtime_dir / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
-    downloaded_file = updates_dir / f"{config.auto_update_asset_name}.download"
-    updater_script = updates_dir / "apply-update.cmd"
+    downloaded_file = updates_dir / f"{config.auto_update_asset_name}.new"
+    updater_script = updates_dir / "apply-update.ps1"
+
+    if notify_user is not None:
+        try:
+            notify_user(UpdateNotification(stage="downloading", release=release))
+        except Exception:
+            LOGGER.exception("Could not show auto-update download notification for release %s.", release.tag_name)
 
     if not _download_file(url=release.download_url, destination=downloaded_file, timeout_seconds=config.auto_update_check_timeout_seconds):
         return False
 
     if notify_user is not None:
         try:
-            notify_user(release)
+            notify_user(UpdateNotification(stage="installing", release=release))
         except Exception:
             LOGGER.exception("Could not show auto-update notification for release %s.", release.tag_name)
 
-    _write_updater_script(
-        script_path=updater_script,
-        source_path=downloaded_file,
-        target_path=current_executable,
-        pid=os.getpid(),
-    )
+    try:
+        _write_updater_script(
+            script_path=updater_script,
+            source_path=downloaded_file,
+            target_path=current_executable,
+            pid=os.getpid(),
+        )
+    except OSError as error:
+        LOGGER.error("Could not write updater script %s: %s", updater_script, error)
+        return False
+
     if not _start_updater_script(updater_script):
         return False
+
+    _save_update_state(
+        state_file_path=state_file_path,
+        state=UpdateState(target_version=release.tag_name, started_at=time.time()),
+    )
 
     LOGGER.info(
         "Started self-update to %s from GitHub release. Current version=%s target=%s",
@@ -169,6 +214,72 @@ def _download_file(*, url: str, destination: Path, timeout_seconds: float) -> bo
     return True
 
 
+def _build_update_state_path(runtime_dir: Path) -> Path:
+    return runtime_dir / "updates" / "update-state.json"
+
+
+def _save_update_state(*, state_file_path: Path, state: UpdateState) -> None:
+    state_file_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "target_version": state.target_version,
+        "started_at": state.started_at,
+    }
+    state_file_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_update_state(*, state_file_path: Path) -> UpdateState | None:
+    if not state_file_path.exists():
+        return None
+
+    try:
+        payload = json.loads(state_file_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    target_version = str(payload.get("target_version") or "").strip()
+    started_at = payload.get("started_at")
+    if not target_version or not isinstance(started_at, (int, float)):
+        return None
+
+    return UpdateState(target_version=target_version, started_at=float(started_at))
+
+
+def _clear_update_state_if_applied(*, state_file_path: Path) -> bool:
+    state = _load_update_state(state_file_path=state_file_path)
+    if state is None:
+        return False
+
+    if not _is_newer_version(candidate=state.target_version, current=__version__):
+        try:
+            state_file_path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        return True
+
+    return False
+
+
+def _should_skip_repeated_failed_update_attempt(
+    *,
+    state_file_path: Path,
+    release: ReleaseInfo,
+    current_version: str,
+) -> bool:
+    state = _load_update_state(state_file_path=state_file_path)
+    if state is None:
+        return False
+
+    if state.target_version != release.tag_name:
+        return False
+
+    if not _is_newer_version(candidate=release.tag_name, current=current_version):
+        return False
+
+    return (time.time() - state.started_at) < _FAILED_UPDATE_RETRY_COOLDOWN_SECONDS
+
+
 def _write_updater_script(
     *,
     script_path: Path,
@@ -176,23 +287,49 @@ def _write_updater_script(
     target_path: Path,
     pid: int,
 ) -> None:
+    source_literal = _to_powershell_literal(str(source_path))
+    target_literal = _to_powershell_literal(str(target_path))
     script_contents = (
-        "@echo off\r\n"
-        "setlocal\r\n"
-        f"set \"PID={pid}\"\r\n"
-        f"set \"SOURCE={source_path}\"\r\n"
-        f"set \"TARGET={target_path}\"\r\n"
-        "for /l %%i in (1,1,120) do (\r\n"
-        "  tasklist /FI \"PID eq %PID%\" 2>NUL | find /I \"%PID%\" >NUL\r\n"
-        "  if errorlevel 1 goto update\r\n"
-        "  timeout /t 1 /nobreak >NUL\r\n"
-        ")\r\n"
-        ":update\r\n"
-        "copy /Y \"%SOURCE%\" \"%TARGET%\" >NUL\r\n"
-        "start \"\" \"%TARGET%\"\r\n"
-        "del /Q \"%SOURCE%\" >NUL 2>&1\r\n"
-        "del /Q \"%~f0\" >NUL 2>&1\r\n"
-        "endlocal\r\n"
+        f"$TargetPid = {pid}\n"
+        f"$SourcePath = '{source_literal}'\n"
+        f"$TargetPath = '{target_literal}'\n"
+        "$CopySucceeded = $false\n"
+        "\n"
+        "for ($attempt = 0; $attempt -lt 120; $attempt++) {\n"
+        "    if (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)) {\n"
+        "        break\n"
+        "    }\n"
+        "    Start-Sleep -Seconds 1\n"
+        "}\n"
+        "\n"
+        "for ($attempt = 0; $attempt -lt 40; $attempt++) {\n"
+        "    try {\n"
+        "        Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force\n"
+        "        $CopySucceeded = $true\n"
+        "        break\n"
+        "    } catch {\n"
+        "        Start-Sleep -Seconds 1\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "try {\n"
+        "    Start-Process -FilePath $TargetPath | Out-Null\n"
+        "} catch {\n"
+        "}\n"
+        "\n"
+        "if ($CopySucceeded) {\n"
+        "    try {\n"
+        "        Remove-Item -LiteralPath $SourcePath -Force -ErrorAction SilentlyContinue\n"
+        "    } catch {\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "$ScriptPath = $MyInvocation.MyCommand.Path\n"
+        "Start-Sleep -Milliseconds 200\n"
+        "try {\n"
+        "    Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue\n"
+        "} catch {\n"
+        "}\n"
     )
     script_path.write_text(script_contents, encoding="utf-8")
 
@@ -201,7 +338,18 @@ def _start_updater_script(script_path: Path) -> bool:
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     try:
         subprocess.Popen(
-            ["cmd.exe", "/c", str(script_path)],
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+                str(script_path),
+            ],
             creationflags=creation_flags,
             close_fds=True,
         )
@@ -210,3 +358,7 @@ def _start_updater_script(script_path: Path) -> bool:
         return False
 
     return True
+
+
+def _to_powershell_literal(value: str) -> str:
+    return value.replace("'", "''")

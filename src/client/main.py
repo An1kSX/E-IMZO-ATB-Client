@@ -19,7 +19,7 @@ from client.system.autostart import sync_windows_auto_start
 from client.system.single_instance import SingleInstanceLock
 from client.system.tray_icon import WindowsTrayIcon
 from client.system.updates import (
-    ReleaseInfo,
+    UpdateNotification,
     maybe_start_self_update_from_github_release_with_notification,
 )
 from client.ui import show_info_message
@@ -204,11 +204,21 @@ def _force_process_exit(code: int) -> None:
     os._exit(code)
 
 
-def _show_auto_update_started_message(release: ReleaseInfo) -> None:
+def _show_auto_update_started_message(notification: UpdateNotification) -> None:
+    if notification.stage == "downloading":
+        show_info_message(
+            title="Найдено обновление",
+            message=(
+                f"Найдена новая версия {notification.release.tag_name}.\n\n"
+                "Сейчас E-IMZO ATB Client начнет скачивание обновления."
+            ),
+        )
+        return
+
     show_info_message(
-        title="Найдено обновление",
+        title="Обновление скачано",
         message=(
-            f"Новая версия {release.tag_name} уже скачана.\n\n"
+            f"Новая версия {notification.release.tag_name} уже скачана.\n\n"
             "Сейчас E-IMZO ATB Client будет перезапущен для установки обновления."
         ),
     )
