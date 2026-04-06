@@ -40,7 +40,7 @@ def terminate_process_by_pid(*, pid: int) -> bool:
         return False
 
     completed = subprocess.run(
-        ["taskkill", "/PID", str(pid), "/F"],
+        ["taskkill", "/PID", str(pid), "/T", "/F"],
         check=False,
         capture_output=True,
         text=True,

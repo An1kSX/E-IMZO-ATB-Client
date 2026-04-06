@@ -75,6 +75,36 @@ def disable_windows_run_entries_by_command_fragment(*, fragment: str) -> int:
     return removed_count
 
 
+def disable_windows_run_entries_by_command_fragments(*, fragments: Sequence[str]) -> int:
+    if platform.system() != "Windows":
+        return 0
+
+    normalized_fragments = [fragment.strip().casefold() for fragment in fragments if fragment.strip()]
+    if not normalized_fragments:
+        return 0
+
+    try:
+        removed_count = _delete_windows_run_values_matching(
+            lambda _, command: isinstance(command, str)
+            and any(fragment in command.casefold() for fragment in normalized_fragments)
+        )
+    except OSError:
+        LOGGER.exception("Could not remove Windows auto-start entries for fragments %r.", fragments)
+        return 0
+
+    if removed_count:
+        LOGGER.info(
+            "Removed %s Windows auto-start entr%s matching fragments %r.",
+            removed_count,
+            "y" if removed_count == 1 else "ies",
+            fragments,
+        )
+    else:
+        LOGGER.info("No Windows auto-start entries matched fragments %r.", fragments)
+
+    return removed_count
+
+
 def _resolve_current_launch_args() -> list[str]:
     orig_argv = getattr(sys, "orig_argv", None)
     if orig_argv:

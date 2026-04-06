@@ -8,7 +8,7 @@ import aiohttp
 from client.bootstrap.config import AppConfig
 from client.integrations.eimzo_api import EimzoApiClient
 from client.system.account import resolve_account_name
-from client.system.autostart import disable_windows_run_entries_by_command_fragment
+from client.system.autostart import disable_windows_run_entries_by_command_fragments
 from client.system.certificates import maintain_localhost_certificate, resolve_server_certificate
 from client.system.eimzo_process import (
     find_listening_process_by_port,
@@ -16,6 +16,7 @@ from client.system.eimzo_process import (
     terminate_process_by_pid,
 )
 from client.transport.websocket.server import WebSocketPortInUseError, WebSocketProxyServer
+from client.ui import show_info_message
 from client.ui.prompts import PromptService, TkPromptService
 
 LOGGER = logging.getLogger(__name__)
@@ -106,6 +107,13 @@ async def _resolve_port_conflict(
     listening_process = find_listening_process_by_port(port=config.ws_port)
     if listening_process is None:
         LOGGER.error("WSS port %s is already in use, but process owner could not be determined.", conflict.port)
+        show_info_message(
+            title="Порт уже занят",
+            message=(
+                f"Порт {conflict.port} уже занят, но определить процесс не удалось.\n\n"
+                "Закройте приложение, которое использует этот порт, и попробуйте снова."
+            ),
+        )
         return False
 
     if not is_eimzo_process_name(listening_process.name):
@@ -115,26 +123,50 @@ async def _resolve_port_conflict(
             listening_process.name,
             listening_process.pid,
         )
+        show_info_message(
+            title="Порт уже занят",
+            message=(
+                f"Порт {conflict.port} уже занят процессом {listening_process.name} (PID {listening_process.pid}).\n\n"
+                "Закройте этот процесс и попробуйте снова."
+            ),
+        )
         return False
 
-    resolution = await prompt_service.resolve_port_conflict(
-        process_name=listening_process.name,
-        port=conflict.port,
-    )
-    if not resolution.terminate_process:
-        return False
+    while True:
+        resolution = await prompt_service.resolve_port_conflict(
+            process_name=listening_process.name,
+            port=conflict.port,
+        )
+        if not resolution.terminate_process:
+            return False
 
-    if resolution.remove_from_autostart:
-        disable_windows_run_entries_by_command_fragment(fragment="e-imzo.exe")
+        if resolution.remove_from_autostart:
+            disable_windows_run_entries_by_command_fragments(
+                fragments=("e-imzo.exe", "javaw.exe", "e-imzo"),
+            )
 
-    stopped = terminate_process_by_pid(pid=listening_process.pid)
-    if not stopped:
+        stopped = terminate_process_by_pid(pid=listening_process.pid)
+        if stopped:
+            LOGGER.info(
+                "Terminated %s (PID %s) and will retry WSS startup.",
+                listening_process.name,
+                listening_process.pid,
+            )
+            return True
+
         LOGGER.error(
             "User approved stopping %s, but process PID %s could not be terminated.",
             listening_process.name,
             listening_process.pid,
         )
-        return False
-
-    LOGGER.info("Terminated %s (PID %s) and will retry WSS startup.", listening_process.name, listening_process.pid)
-    return True
+        show_info_message(
+            title="Не удалось закрыть E-IMZO",
+            message=(
+                f"Не удалось закрыть процесс {listening_process.name} (PID {listening_process.pid}).\n\n"
+                "Попробуйте закрыть E-IMZO вручную или повторите попытку."
+            ),
+        )
+        refreshed_process = find_listening_process_by_port(port=config.ws_port)
+        if refreshed_process is None or not is_eimzo_process_name(refreshed_process.name):
+            return True
+        listening_process = refreshed_process
