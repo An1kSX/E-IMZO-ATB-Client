@@ -8,6 +8,10 @@ import subprocess
 
 LOGGER = logging.getLogger(__name__)
 _EIMZO_PROCESS_NAME = "E-IMZO.exe"
+_EIMZO_PROCESS_NAME_ALIASES = {
+    _EIMZO_PROCESS_NAME.casefold(),
+    "javaw.exe",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +59,7 @@ def terminate_process_by_pid(*, pid: int) -> bool:
 
 
 def is_eimzo_process_name(name: str) -> bool:
-    return name.strip().casefold() == _EIMZO_PROCESS_NAME.casefold()
+    return name.strip().casefold() in _EIMZO_PROCESS_NAME_ALIASES
 
 
 def _resolve_windows_pid_by_port(*, port: int) -> int | None:

@@ -301,7 +301,7 @@ def _show_port_conflict_dialog(
 
             ttk.Button(
                 box,
-                text="Выключить E-IMZO.exe",
+                text="Выключить E-IMZO",
                 width=22,
                 command=self._confirm_terminate,
                 default="active",
