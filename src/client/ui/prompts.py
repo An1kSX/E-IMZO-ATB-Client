@@ -9,6 +9,12 @@ from typing import Protocol
 from client.domain.commands import ProxyCommand
 
 
+@dataclass(frozen=True, slots=True)
+class PortConflictResolution:
+    terminate_process: bool
+    remove_from_autostart: bool
+
+
 class PromptService(Protocol):
     async def confirm_sensitive_operation(
         self,
@@ -25,6 +31,14 @@ class PromptService(Protocol):
         reason: str,
         error_message: str | None = None,
     ) -> str | None:
+        ...
+
+    async def resolve_port_conflict(
+        self,
+        *,
+        process_name: str,
+        port: int,
+    ) -> PortConflictResolution:
         ...
 
     def close(self) -> None:
@@ -66,6 +80,22 @@ class TkPromptService:
                 account_name=account_name,
                 reason=reason,
                 error_message=error_message,
+            ),
+        )
+
+    async def resolve_port_conflict(
+        self,
+        *,
+        process_name: str,
+        port: int,
+    ) -> PortConflictResolution:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(
+                _show_port_conflict_dialog,
+                process_name=process_name,
+                port=port,
             ),
         )
 
@@ -224,6 +254,82 @@ def _show_password_dialog(
     return _run_dialog(dialog_factory=PasswordDialog)
 
 
+def _show_port_conflict_dialog(
+    *,
+    process_name: str,
+    port: int,
+) -> PortConflictResolution:
+    import tkinter as tk
+    from tkinter import simpledialog
+    from tkinter import ttk
+
+    class PortConflictDialog(simpledialog.Dialog):
+        def __init__(self, parent: tk.Misc) -> None:
+            self._remove_from_autostart_var = tk.BooleanVar(value=False)
+            self.result = PortConflictResolution(terminate_process=False, remove_from_autostart=False)
+            super().__init__(parent, title="Конфликт локального порта")
+
+        def body(self, master: tk.Misc) -> tk.Widget:
+            self.resizable(False, False)
+            self.attributes("-topmost", True)
+
+            container = ttk.Frame(master, padding=16)
+            container.grid(sticky="nsew")
+            container.columnconfigure(0, weight=1)
+
+            ttk.Label(
+                container,
+                text=(
+                    f"Порт {port} уже занят процессом {process_name}. "
+                    "Чтобы запустить E-IMZO ATB Client, нужно закрыть этот процесс."
+                ),
+                wraplength=420,
+                justify="left",
+            ).grid(row=0, column=0, sticky="w")
+
+            ttk.Checkbutton(
+                container,
+                text="Убрать E-IMZO из автозагрузки",
+                variable=self._remove_from_autostart_var,
+            ).grid(row=1, column=0, sticky="w", pady=(12, 0))
+
+            return container
+
+        def buttonbox(self) -> None:
+            box = ttk.Frame(self, padding=(16, 0, 16, 16))
+            box.pack()
+
+            ttk.Button(
+                box,
+                text="Выключить E-IMZO.exe",
+                width=22,
+                command=self._confirm_terminate,
+                default="active",
+            ).grid(row=0, column=0, padx=(0, 8))
+            ttk.Button(
+                box,
+                text="Отменить запуск",
+                width=18,
+                command=self.cancel,
+            ).grid(row=0, column=1)
+
+            self.bind("<Return>", lambda event: self._confirm_terminate())
+            self.bind("<Escape>", self.cancel)
+
+        def cancel(self, event=None):  # type: ignore[override]
+            self.result = PortConflictResolution(terminate_process=False, remove_from_autostart=False)
+            return super().cancel(event)
+
+        def _confirm_terminate(self) -> None:
+            self.result = PortConflictResolution(
+                terminate_process=True,
+                remove_from_autostart=bool(self._remove_from_autostart_var.get()),
+            )
+            self.ok()
+
+    return _run_dialog(dialog_factory=PortConflictDialog)
+
+
 def _show_api_base_url_dialog(
     *,
     initial_value: str | None,
@@ -324,7 +430,7 @@ def _show_info_dialog(*, title: str, message: str) -> None:
         root.destroy()
 
 
-def _run_dialog(dialog_factory: type) -> bool | str | None:
+def _run_dialog(dialog_factory: type) -> bool | str | PortConflictResolution | None:
     import tkinter as tk
 
     root = tk.Tk()

@@ -16,6 +16,7 @@ from client.bootstrap.config import (
 from client.bootstrap.logging import configure_logging
 from client.system.app_icon import resolve_app_icon_path
 from client.system.autostart import sync_windows_auto_start
+from client.system.single_instance import SingleInstanceLock
 from client.system.tray_icon import WindowsTrayIcon
 from client.ui import show_info_message
 
@@ -38,14 +39,28 @@ def main() -> None:
         log_dir=config.log_dir,
     )
     sync_windows_auto_start(enabled=config.windows_auto_start_enabled)
+    instance_lock = SingleInstanceLock(config.runtime_dir / "instance.lock")
+    if not instance_lock.acquire():
+        logging.getLogger(__name__).warning("Another E-IMZO ATB Client instance is already running.")
+        try:
+            show_info_message(
+                title="E-IMZO ATB Client уже запущен",
+                message="Нельзя запускать несколько экземпляров одновременно. Закройте текущий экземпляр и попробуйте снова.",
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("Could not show duplicate-instance warning dialog.")
+        raise SystemExit(0)
 
     try:
-        asyncio.run(_run_with_system_tray(config))
-    except KeyboardInterrupt:
-        logging.getLogger(__name__).info("Local WSS service stopped by user.")
-    except Exception:
-        logging.getLogger(__name__).exception("Local WSS service stopped because of an unexpected error.")
-        raise SystemExit(1)
+        try:
+            asyncio.run(_run_with_system_tray(config))
+        except KeyboardInterrupt:
+            logging.getLogger(__name__).info("Local WSS service stopped by user.")
+        except Exception:
+            logging.getLogger(__name__).exception("Local WSS service stopped because of an unexpected error.")
+            raise SystemExit(1)
+    finally:
+        instance_lock.release()
 
 
 async def _run_with_system_tray(config: AppConfig) -> None:

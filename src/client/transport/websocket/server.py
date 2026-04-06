@@ -23,6 +23,13 @@ _SERVER_RELOAD_CLOSE_REASON = "Server certificate reloaded"
 _UNEXPECTED_PATH_CLOSE_REASON = "Unexpected WebSocket path"
 
 
+class WebSocketPortInUseError(RuntimeError):
+    def __init__(self, *, host: str, port: int, error: OSError) -> None:
+        super().__init__(f"WebSocket port {host}:{port} is already in use: {error}")
+        self.host = host
+        self.port = port
+
+
 class WebSocketProxyServer:
     def __init__(
         self,
@@ -45,6 +52,18 @@ class WebSocketProxyServer:
                 await self._serve_until_certificate_rotation()
             except asyncio.CancelledError:
                 raise
+            except OSError as error:
+                if _is_address_in_use_error(error):
+                    raise WebSocketPortInUseError(
+                        host=self._config.ws_host,
+                        port=self._config.ws_port,
+                        error=error,
+                    ) from error
+                LOGGER.exception(
+                    "Local WSS server failed. Restarting in %.1f seconds.",
+                    self._config.server_retry_delay_seconds,
+                )
+                await asyncio.sleep(self._config.server_retry_delay_seconds)
             except Exception:
                 LOGGER.exception(
                     "Local WSS server failed. Restarting in %.1f seconds.",
@@ -214,3 +233,15 @@ def _format_close_frame(close_frame: Any | None) -> str:
     if reason:
         return f"{code}:{reason}"
     return str(code)
+
+
+def _is_address_in_use_error(error: OSError) -> bool:
+    winerror = getattr(error, "winerror", None)
+    if winerror == 10048:
+        return True
+
+    if error.errno in {48, 98}:
+        return True
+
+    message = str(error).casefold()
+    return "address already in use" in message or "only one usage of each socket address" in message

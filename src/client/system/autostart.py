@@ -6,7 +6,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from typing import Sequence
+from typing import Callable, Sequence
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +44,35 @@ def resolve_windows_auto_start_command(argv: Sequence[str] | None = None) -> str
 
     launch_args[0] = _normalize_interpreter_for_background_launch(launch_args[0])
     return subprocess.list2cmdline(launch_args)
+
+
+def disable_windows_run_entries_by_command_fragment(*, fragment: str) -> int:
+    if platform.system() != "Windows":
+        return 0
+
+    normalized_fragment = fragment.strip().casefold()
+    if not normalized_fragment:
+        return 0
+
+    try:
+        removed_count = _delete_windows_run_values_matching(
+            lambda _, command: isinstance(command, str) and normalized_fragment in command.casefold()
+        )
+    except OSError:
+        LOGGER.exception("Could not remove Windows auto-start entries for fragment %r.", fragment)
+        return 0
+
+    if removed_count:
+        LOGGER.info(
+            "Removed %s Windows auto-start entr%s matching fragment %r.",
+            removed_count,
+            "y" if removed_count == 1 else "ies",
+            fragment,
+        )
+    else:
+        LOGGER.info("No Windows auto-start entries matched fragment %r.", fragment)
+
+    return removed_count
 
 
 def _resolve_current_launch_args() -> list[str]:
@@ -115,6 +144,34 @@ def _delete_windows_run_value(name: str) -> bool:
             return False
 
     return True
+
+
+def _delete_windows_run_values_matching(predicate: Callable[[str, object], bool]) -> int:
+    winreg = _load_winreg()
+    access = winreg.KEY_READ | winreg.KEY_WRITE
+    removed_count = 0
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_REGISTRY_PATH, 0, access) as key:
+        value_names: list[str] = []
+        index = 0
+        while True:
+            try:
+                value_name, command, _value_type = winreg.EnumValue(key, index)
+            except OSError:
+                break
+            value_names.append(value_name)
+            index += 1
+
+        for value_name in value_names:
+            try:
+                command, _value_type = winreg.QueryValueEx(key, value_name)
+            except FileNotFoundError:
+                continue
+            if not predicate(value_name, command):
+                continue
+            winreg.DeleteValue(key, value_name)
+            removed_count += 1
+
+    return removed_count
 
 
 def _load_winreg():

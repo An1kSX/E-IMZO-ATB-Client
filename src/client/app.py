@@ -8,9 +8,15 @@ import aiohttp
 from client.bootstrap.config import AppConfig
 from client.integrations.eimzo_api import EimzoApiClient
 from client.system.account import resolve_account_name
+from client.system.autostart import disable_windows_run_entries_by_command_fragment
 from client.system.certificates import maintain_localhost_certificate, resolve_server_certificate
-from client.transport.websocket.server import WebSocketProxyServer
-from client.ui.prompts import TkPromptService
+from client.system.eimzo_process import (
+    find_listening_process_by_port,
+    is_eimzo_process_name,
+    terminate_process_by_pid,
+)
+from client.transport.websocket.server import WebSocketPortInUseError, WebSocketProxyServer
+from client.ui.prompts import PromptService, TkPromptService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,9 +77,64 @@ async def run_app(config: AppConfig) -> None:
                 server_key_path=server_certificate.key_path,
                 certificate_rotation_event=certificate_rotation_event,
             )
-            await websocket_server.run_forever()
+            while True:
+                try:
+                    await websocket_server.run_forever()
+                    return
+                except WebSocketPortInUseError as error:
+                    should_retry = await _resolve_port_conflict(
+                        config=config,
+                        prompt_service=prompt_service,
+                        conflict=error,
+                    )
+                    if not should_retry:
+                        LOGGER.info("Startup was cancelled because WSS port %s is already in use.", error.port)
+                        return
     finally:
         prompt_service.close()
         if certificate_task is not None:
             certificate_task.cancel()
             await asyncio.gather(certificate_task, return_exceptions=True)
+
+
+async def _resolve_port_conflict(
+    *,
+    config: AppConfig,
+    prompt_service: PromptService,
+    conflict: WebSocketPortInUseError,
+) -> bool:
+    listening_process = find_listening_process_by_port(port=config.ws_port)
+    if listening_process is None:
+        LOGGER.error("WSS port %s is already in use, but process owner could not be determined.", conflict.port)
+        return False
+
+    if not is_eimzo_process_name(listening_process.name):
+        LOGGER.error(
+            "WSS port %s is already in use by %s (PID %s).",
+            conflict.port,
+            listening_process.name,
+            listening_process.pid,
+        )
+        return False
+
+    resolution = await prompt_service.resolve_port_conflict(
+        process_name=listening_process.name,
+        port=conflict.port,
+    )
+    if not resolution.terminate_process:
+        return False
+
+    if resolution.remove_from_autostart:
+        disable_windows_run_entries_by_command_fragment(fragment="e-imzo.exe")
+
+    stopped = terminate_process_by_pid(pid=listening_process.pid)
+    if not stopped:
+        LOGGER.error(
+            "User approved stopping %s, but process PID %s could not be terminated.",
+            listening_process.name,
+            listening_process.pid,
+        )
+        return False
+
+    LOGGER.info("Terminated %s (PID %s) and will retry WSS startup.", listening_process.name, listening_process.pid)
+    return True

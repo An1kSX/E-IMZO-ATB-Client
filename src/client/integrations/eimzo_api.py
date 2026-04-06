@@ -42,6 +42,10 @@ LOGGER = logging.getLogger(__name__)
 _USER_ACTION_LOG_EXTRA = {"user_action": True}
 
 
+class _UpstreamRequestError(RuntimeError):
+    """Raised when an HTTP request to E-IMZO API cannot be completed."""
+
+
 @dataclass(frozen=True, slots=True)
 class ProxyResponse:
     body: bytes
@@ -122,10 +126,14 @@ class EimzoApiClient:
         self._auth_lock = asyncio.Lock()
 
     async def ensure_authenticated(self) -> bool:
-        token = await self._ensure_access_token(
-            reason="Введите пароль для входа в E-IMZO перед началом работы приложения.",
-        )
-        return token is not None
+        try:
+            token = await self._ensure_access_token(
+                reason="Введите пароль для входа в E-IMZO перед началом работы приложения.",
+            )
+            return token is not None
+        except _UpstreamRequestError as error:
+            LOGGER.warning("Could not authenticate with E-IMZO API during startup: %s", error)
+            return False
 
     async def forward(self, command: ProxyCommand) -> ProxyResponse:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
@@ -147,25 +155,9 @@ class EimzoApiClient:
                 )
                 return _cancelled_proxy_response()
 
-        token = await self._ensure_access_token(
-            reason="Введите пароль для получения доступа к E-IMZO API.",
-        )
-        if token is None:
-            return _cancelled_proxy_response()
-
-        response = await self._forward_with_token(
-            command=command,
-            endpoint_url=endpoint_url,
-            request_arguments=prepared_request.arguments,
-            access_token=token,
-        )
-
-        if response.status == 401:
-            LOGGER.info("Access token was rejected for %s. Requesting a new password.", command_label)
-            self._access_token = None
+        try:
             token = await self._ensure_access_token(
-                force_refresh=True,
-                reason="Срок действия сессии истек. Введите пароль повторно.",
+                reason="Введите пароль для получения доступа к E-IMZO API.",
             )
             if token is None:
                 return _cancelled_proxy_response()
@@ -177,8 +169,28 @@ class EimzoApiClient:
                 access_token=token,
             )
 
-        self._remember_key_identity(key_name=key_name, response=response.proxy_response)
-        return response.proxy_response
+            if response.status == 401:
+                LOGGER.info("Access token was rejected for %s. Requesting a new password.", command_label)
+                self._access_token = None
+                token = await self._ensure_access_token(
+                    force_refresh=True,
+                    reason="Срок действия сессии истек. Введите пароль повторно.",
+                )
+                if token is None:
+                    return _cancelled_proxy_response()
+
+                response = await self._forward_with_token(
+                    command=command,
+                    endpoint_url=endpoint_url,
+                    request_arguments=prepared_request.arguments,
+                    access_token=token,
+                )
+
+            self._remember_key_identity(key_name=key_name, response=response.proxy_response)
+            return response.proxy_response
+        except _UpstreamRequestError as error:
+            LOGGER.warning("E-IMZO API request failed for %s: %s", command_label, error)
+            return _failed_proxy_response(str(error))
 
     def _build_endpoint_url(self, plugin: str | None, name: str) -> str:
         segments = [self._api_base_url]
@@ -343,36 +355,57 @@ class EimzoApiClient:
             request_kwargs["json"] = json_payload
 
         LOGGER.info("Forwarding %s %s", method, endpoint_url)
-        async with self._session.request(method, endpoint_url, **request_kwargs) as response:
-            body = await response.read()
-            LOGGER.info(
-                "Received API response %s %s for %s %s",
-                response.status,
-                response.reason,
-                method,
-                endpoint_url,
-            )
-            if response.status >= 400:
-                LOGGER.warning(
-                    "API error response body for %s %s: %s",
+        try:
+            async with self._session.request(method, endpoint_url, **request_kwargs) as response:
+                body = await response.read()
+                LOGGER.info(
+                    "Received API response %s %s for %s %s",
+                    response.status,
+                    response.reason,
                     method,
                     endpoint_url,
-                    _format_body_for_log(body=body, charset=response.charset),
                 )
+                if response.status >= 400:
+                    LOGGER.warning(
+                        "API error response body for %s %s: %s",
+                        method,
+                        endpoint_url,
+                        _format_body_for_log(body=body, charset=response.charset),
+                    )
 
-            return HttpProxyResponse(
-                status=response.status,
-                reason=response.reason,
-                proxy_response=ProxyResponse(
-                    body=body,
-                    content_type=response.content_type,
-                    charset=response.charset,
-                ),
-            )
+                return HttpProxyResponse(
+                    status=response.status,
+                    reason=response.reason,
+                    proxy_response=ProxyResponse(
+                        body=body,
+                        content_type=response.content_type,
+                        charset=response.charset,
+                    ),
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            raise _UpstreamRequestError(
+                _format_transport_error_message(
+                    method=method,
+                    endpoint_url=endpoint_url,
+                    error=error,
+                )
+            ) from error
 
 
 def _cancelled_proxy_response() -> ProxyResponse:
     return ProxyResponse.from_json({"success": False})
+
+
+def _failed_proxy_response(message: str) -> ProxyResponse:
+    return ProxyResponse.from_json({"success": False, "message": message})
+
+
+def _format_transport_error_message(*, method: str, endpoint_url: str, error: Exception) -> str:
+    if isinstance(error, asyncio.TimeoutError):
+        details = "Request timed out."
+    else:
+        details = str(error).strip() or error.__class__.__name__
+    return f"{method} {endpoint_url}: {details}"
 
 
 def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
@@ -515,3 +548,4 @@ def _extract_jwt_expiration(token_value: str) -> float | None:
         return float(exp)
 
     return None
+
