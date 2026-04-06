@@ -41,6 +41,9 @@ class AppConfig:
     local_cert_valid_days: int
     local_cert_renew_before_days: int
     account_name_override: str | None = None
+    auto_update_enabled: bool = True
+    auto_update_asset_name: str = "eimzo-atb-client.exe"
+    auto_update_check_timeout_seconds: float = 5.0
 
     @classmethod
     def from_env(
@@ -83,6 +86,9 @@ class AppConfig:
             local_cert_valid_days=_read_int("LOCAL_CERT_VALID_DAYS", default=365),
             local_cert_renew_before_days=_read_int("LOCAL_CERT_RENEW_BEFORE_DAYS", default=30),
             account_name_override=os.getenv("ACCOUNT_NAME_OVERRIDE"),
+            auto_update_enabled=_read_bool("AUTO_UPDATE_ENABLED", default=True),
+            auto_update_asset_name=os.getenv("AUTO_UPDATE_ASSET_NAME", "eimzo-atb-client.exe"),
+            auto_update_check_timeout_seconds=_read_float("AUTO_UPDATE_CHECK_TIMEOUT_SECONDS", default=5.0),
         )
         config._validate()
         return config

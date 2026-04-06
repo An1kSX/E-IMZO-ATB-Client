@@ -18,6 +18,7 @@ from client.system.app_icon import resolve_app_icon_path
 from client.system.autostart import sync_windows_auto_start
 from client.system.single_instance import SingleInstanceLock
 from client.system.tray_icon import WindowsTrayIcon
+from client.system.updates import maybe_start_self_update_from_github_release
 from client.ui import show_info_message
 
 _TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -52,6 +53,9 @@ def main() -> None:
         raise SystemExit(0)
 
     try:
+        if maybe_start_self_update_from_github_release(config=config):
+            logging.getLogger(__name__).info("Auto-update started. Exiting current process.")
+            return
         try:
             asyncio.run(_run_with_system_tray(config))
         except KeyboardInterrupt:
