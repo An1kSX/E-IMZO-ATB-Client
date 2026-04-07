@@ -104,7 +104,17 @@ def maybe_start_self_update_from_github_release_with_notification(
 
     current_executable = Path(sys.executable).resolve()
     updates_dir = config.runtime_dir / "updates"
-    updates_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        updates_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        LOGGER.error("Auto-update aborted because updates directory %s is not available: %s", updates_dir, error)
+        return False
+
+    if not _ensure_directory_writable(directory=updates_dir, purpose="the updates runtime directory"):
+        return False
+    if not _ensure_directory_writable(directory=current_executable.parent, purpose="the executable directory"):
+        return False
+
     downloaded_file = updates_dir / f"{config.auto_update_asset_name}.new"
     updater_script = updates_dir / "apply-update.cmd"
     updater_log_file = updates_dir / "apply-update.log"
@@ -124,6 +134,13 @@ def maybe_start_self_update_from_github_release_with_notification(
         except FileNotFoundError:
             pass
         except OSError as error:
+            if stale_file == updater_start_marker:
+                LOGGER.error(
+                    "Auto-update aborted because stale updater marker %s could not be removed: %s",
+                    stale_file,
+                    error,
+                )
+                return False
             LOGGER.warning("Could not remove stale updater file %s: %s", stale_file, error)
 
     if notify_user is not None:
@@ -135,12 +152,6 @@ def maybe_start_self_update_from_github_release_with_notification(
     if not _download_file(url=release.download_url, destination=downloaded_file, timeout_seconds=config.auto_update_check_timeout_seconds):
         LOGGER.warning("Auto-update aborted because the release asset could not be downloaded.")
         return False
-
-    if notify_user is not None:
-        try:
-            notify_user(UpdateNotification(stage="installing", release=release))
-        except Exception:
-            LOGGER.exception("Could not show auto-update notification for release %s.", release.tag_name)
 
     try:
         _write_updater_script(
@@ -159,10 +170,19 @@ def maybe_start_self_update_from_github_release_with_notification(
         LOGGER.error("Auto-update aborted because updater script could not be started.")
         return False
 
-    _save_update_state(
-        state_file_path=state_file_path,
-        state=UpdateState(target_version=release.tag_name, started_at=time.time()),
-    )
+    if notify_user is not None:
+        try:
+            notify_user(UpdateNotification(stage="installing", release=release))
+        except Exception:
+            LOGGER.exception("Could not show auto-update notification for release %s.", release.tag_name)
+
+    try:
+        _save_update_state(
+            state_file_path=state_file_path,
+            state=UpdateState(target_version=release.tag_name, started_at=time.time()),
+        )
+    except OSError as error:
+        LOGGER.warning("Could not persist auto-update state to %s: %s", state_file_path, error)
 
     LOGGER.info(
         "Started self-update to %s from GitHub release. Current version=%s target=%s",
@@ -183,6 +203,22 @@ def _can_self_update(config: AppConfig) -> bool:
     if not config.auto_update_enabled:
         LOGGER.info("Auto-update disabled by configuration.")
         return False
+    return True
+
+
+def _ensure_directory_writable(*, directory: Path, purpose: str) -> bool:
+    probe_path = directory / f".update-write-test-{os.getpid()}-{time.time_ns()}.tmp"
+    try:
+        probe_path.write_text("", encoding="utf-8")
+    except OSError as error:
+        LOGGER.error("Auto-update aborted because %s is not writable (%s): %s", purpose, directory, error)
+        return False
+
+    try:
+        probe_path.unlink()
+    except OSError as error:
+        LOGGER.warning("Could not remove temporary auto-update probe file %s: %s", probe_path, error)
+
     return True
 
 
