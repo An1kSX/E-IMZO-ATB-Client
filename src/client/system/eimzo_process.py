@@ -29,7 +29,6 @@ class ListeningProcess:
 @dataclass(frozen=True, slots=True)
 class WindowsProcessInfo:
     pid: int
-    parent_pid: int
     name: str
     executable_path: str | None = None
     command_line: str | None = None
@@ -96,10 +95,11 @@ def terminate_related_eimzo_processes(*, listening_process: ListeningProcess) ->
         return False
 
     process_snapshot = _resolve_windows_process_snapshot()
-    target_pids = _resolve_related_eimzo_pids(
-        listening_process=listening_process,
-        process_snapshot=process_snapshot,
-    )
+    target_pids = [
+        process.pid
+        for process in process_snapshot
+        if is_eimzo_process(process)
+    ]
     if not target_pids:
         target_pids = [listening_process.pid]
 
@@ -203,8 +203,8 @@ def _resolve_windows_process_name(*, pid: int) -> str | None:
 
 def _resolve_windows_process_snapshot() -> list[WindowsProcessInfo]:
     command = (
-        "Get-CimInstance Win32_Process | "
-        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+        "Get-Process | "
+        "Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress"
     )
     completed = subprocess.run(
         ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
@@ -240,74 +240,20 @@ def _resolve_windows_process_snapshot() -> list[WindowsProcessInfo]:
     for item in payload:
         if not isinstance(item, dict):
             continue
-        process_id = item.get("ProcessId")
-        parent_process_id = item.get("ParentProcessId")
-        name = str(item.get("Name") or "").strip()
-        executable_path = _normalize_optional_process_text(item.get("ExecutablePath"))
-        command_line = _normalize_optional_process_text(item.get("CommandLine"))
-        if not isinstance(process_id, int) or not isinstance(parent_process_id, int) or not name:
+        process_id = item.get("Id")
+        name = str(item.get("ProcessName") or "").strip()
+        executable_path = _normalize_optional_process_text(item.get("Path"))
+        if not isinstance(process_id, int) or not name:
             continue
         result.append(
             WindowsProcessInfo(
                 pid=process_id,
-                parent_pid=parent_process_id,
-                name=name,
+                name=_normalize_process_name(name),
                 executable_path=executable_path,
-                command_line=command_line,
             )
         )
 
     return result
-
-
-def _resolve_related_eimzo_pids(
-    *,
-    listening_process: ListeningProcess,
-    process_snapshot: list[WindowsProcessInfo],
-) -> list[int]:
-    by_pid = {process.pid: process for process in process_snapshot}
-    ordered_pids: list[int] = []
-
-    current_pid = listening_process.pid
-    ancestor_chain: list[int] = []
-    while current_pid in by_pid:
-        process = by_pid[current_pid]
-        if is_eimzo_process(process):
-            ancestor_chain.append(process.pid)
-        if process.parent_pid <= 0 or process.parent_pid == current_pid:
-            break
-        current_pid = process.parent_pid
-
-    for pid in reversed(ancestor_chain):
-        if pid not in ordered_pids:
-            ordered_pids.append(pid)
-
-    if listening_process.pid not in ordered_pids:
-        ordered_pids.append(listening_process.pid)
-
-    protected_roots = set(ordered_pids)
-    descendant_added = True
-    while descendant_added:
-        descendant_added = False
-        for process in process_snapshot:
-            if process.pid in ordered_pids:
-                continue
-            if process.parent_pid not in protected_roots:
-                continue
-            if not is_eimzo_process(process):
-                continue
-            ordered_pids.append(process.pid)
-            protected_roots.add(process.pid)
-            descendant_added = True
-
-    for process in process_snapshot:
-        if process.pid in ordered_pids:
-            continue
-        if not is_eimzo_process(process):
-            continue
-        ordered_pids.append(process.pid)
-
-    return ordered_pids
 
 
 def _matches_eimzo_identity(
@@ -326,10 +272,10 @@ def _matches_eimzo_identity(
     if normalized_name in _EIMZO_PROCESS_NAME_ALIASES and not normalized_executable_path and not normalized_command_line:
         return True
 
-    if _EIMZO_INSTALL_DIR in normalized_executable_path:
+    if normalized_name in {"javaw.exe", "java.exe"} and normalized_executable_path.startswith(_EIMZO_INSTALL_DIR):
         return True
 
-    if _EIMZO_INSTALL_DIR in normalized_command_line:
+    if normalized_name in {"javaw.exe", "java.exe"} and _EIMZO_INSTALL_DIR in normalized_command_line:
         return True
 
     if normalized_name in {"javaw.exe", "java.exe"}:
@@ -343,6 +289,15 @@ def _normalize_optional_process_text(value: object) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _normalize_process_name(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        return normalized
+    if normalized.lower().endswith(".exe"):
+        return normalized
+    return f"{normalized}.exe"
 
 
 def _windows_creation_flags() -> int:

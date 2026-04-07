@@ -146,6 +146,7 @@ async def _resolve_port_conflict(
             removed_autostart_entries = disable_windows_run_entries_by_command_fragments(
                 fragments=(
                     "e-imzo.exe",
+                    "e-imzo.lnk",
                     "javaw.exe",
                     "java.exe",
                     "e-imzo",
