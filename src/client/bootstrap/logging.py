@@ -26,6 +26,11 @@ class _UserActionFileLogFilter(logging.Filter):
         return record.name.startswith("client.") and bool(getattr(record, "user_action", False))
 
 
+class _UpdateFileLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith("client.system.updates")
+
+
 def configure_logging(
     level: str,
     *,
@@ -75,6 +80,12 @@ def configure_logging(
                 backupCount=_LOG_FILE_BACKUP_COUNT,
                 encoding="utf-8",
             )
+            updates_handler = RotatingFileHandler(
+                candidate_dir / "eimzo-atb-client-update.log",
+                maxBytes=_LOG_FILE_MAX_BYTES,
+                backupCount=_LOG_FILE_BACKUP_COUNT,
+                encoding="utf-8",
+            )
         except OSError as error:
             _LOGGER.warning("Could not initialize file logging in %s: %s", candidate_dir, error)
             continue
@@ -89,9 +100,15 @@ def configure_logging(
         actions_handler.addFilter(_UserActionFileLogFilter())
         root_logger.addHandler(actions_handler)
 
+        updates_handler.setLevel(logging.INFO)
+        updates_handler.setFormatter(formatter)
+        updates_handler.addFilter(_UpdateFileLogFilter())
+        root_logger.addHandler(updates_handler)
+
         _LOGGER.info(
-            "Application file logging is enabled at %s and %s",
+            "Application file logging is enabled at %s, %s and %s",
             candidate_dir / "eimzo-atb-client.log",
             candidate_dir / "eimzo-atb-client-actions.log",
+            candidate_dir / "eimzo-atb-client-update.log",
         )
         return

@@ -51,7 +51,16 @@ def maybe_start_self_update_from_github_release_with_notification(
     config: AppConfig,
     notify_user: Callable[[UpdateNotification], None] | None = None,
 ) -> bool:
+    LOGGER.info(
+        "Starting auto-update check. current_version=%s repo=%s asset_name=%s frozen=%s platform=%s",
+        __version__,
+        _DEFAULT_RELEASE_REPO,
+        config.auto_update_asset_name,
+        getattr(sys, "frozen", False),
+        platform.system(),
+    )
     if not _can_self_update(config):
+        LOGGER.info("Auto-update check stopped because self-update is not available in this runtime.")
         return False
 
     state_file_path = _build_update_state_path(config.runtime_dir)
@@ -64,9 +73,20 @@ def maybe_start_self_update_from_github_release_with_notification(
         timeout_seconds=config.auto_update_check_timeout_seconds,
     )
     if release is None:
+        LOGGER.info("Auto-update check finished without a usable release.")
         return False
 
+    LOGGER.info(
+        "Resolved latest GitHub release. tag_name=%s download_url=%s",
+        release.tag_name,
+        release.download_url,
+    )
     if not _is_newer_version(candidate=release.tag_name, current=__version__):
+        LOGGER.info(
+            "Auto-update skipped because the latest release is not newer. current_version=%s latest_version=%s",
+            __version__,
+            release.tag_name,
+        )
         return False
 
     if _should_skip_repeated_failed_update_attempt(
@@ -85,6 +105,14 @@ def maybe_start_self_update_from_github_release_with_notification(
     updates_dir.mkdir(parents=True, exist_ok=True)
     downloaded_file = updates_dir / f"{config.auto_update_asset_name}.new"
     updater_script = updates_dir / "apply-update.ps1"
+    updater_log_file = updates_dir / "apply-update.log"
+    LOGGER.info(
+        "Preparing auto-update files. executable=%s downloaded_file=%s updater_script=%s updater_log=%s",
+        current_executable,
+        downloaded_file,
+        updater_script,
+        updater_log_file,
+    )
 
     if notify_user is not None:
         try:
@@ -93,6 +121,7 @@ def maybe_start_self_update_from_github_release_with_notification(
             LOGGER.exception("Could not show auto-update download notification for release %s.", release.tag_name)
 
     if not _download_file(url=release.download_url, destination=downloaded_file, timeout_seconds=config.auto_update_check_timeout_seconds):
+        LOGGER.warning("Auto-update aborted because the release asset could not be downloaded.")
         return False
 
     if notify_user is not None:
@@ -107,12 +136,14 @@ def maybe_start_self_update_from_github_release_with_notification(
             source_path=downloaded_file,
             target_path=current_executable,
             pid=os.getpid(),
+            log_path=updater_log_file,
         )
     except OSError as error:
         LOGGER.error("Could not write updater script %s: %s", updater_script, error)
         return False
 
     if not _start_updater_script(updater_script):
+        LOGGER.error("Auto-update aborted because updater script could not be started.")
         return False
 
     _save_update_state(
@@ -131,17 +162,20 @@ def maybe_start_self_update_from_github_release_with_notification(
 
 def _can_self_update(config: AppConfig) -> bool:
     if platform.system() != "Windows":
+        LOGGER.info("Auto-update disabled because the current platform is not Windows.")
         return False
     if not getattr(sys, "frozen", False):
-        LOGGER.debug("Auto-update skipped because app is not running as frozen executable.")
+        LOGGER.info("Auto-update skipped because app is not running as frozen executable.")
         return False
     if not config.auto_update_enabled:
+        LOGGER.info("Auto-update disabled by configuration.")
         return False
     return True
 
 
 def _fetch_latest_release(*, repo: str, asset_name: str, timeout_seconds: float) -> ReleaseInfo | None:
     url = f"{_DEFAULT_GITHUB_API}/repos/{repo}/releases/latest"
+    LOGGER.info("Requesting latest GitHub release metadata from %s", url)
     request = urllib.request.Request(
         url,
         headers={
@@ -158,6 +192,7 @@ def _fetch_latest_release(*, repo: str, asset_name: str, timeout_seconds: float)
 
     tag_name = str(payload.get("tag_name") or "").strip()
     if not tag_name:
+        LOGGER.warning("Latest GitHub release response did not contain tag_name.")
         return None
 
     download_url = _resolve_asset_download_url(payload=payload, asset_name=asset_name)
@@ -200,6 +235,7 @@ def _parse_version(value: str) -> tuple[int, ...]:
 
 
 def _download_file(*, url: str, destination: Path, timeout_seconds: float) -> bool:
+    LOGGER.info("Downloading auto-update asset from %s to %s", url, destination)
     request = urllib.request.Request(
         url,
         headers={"User-Agent": _USER_AGENT},
@@ -211,6 +247,11 @@ def _download_file(*, url: str, destination: Path, timeout_seconds: float) -> bo
         LOGGER.warning("Auto-update download failed from %s: %s", url, error)
         return False
 
+    try:
+        file_size = destination.stat().st_size
+    except OSError:
+        file_size = -1
+    LOGGER.info("Downloaded auto-update asset successfully. destination=%s size_bytes=%s", destination, file_size)
     return True
 
 
@@ -286,19 +327,31 @@ def _write_updater_script(
     source_path: Path,
     target_path: Path,
     pid: int,
+    log_path: Path,
 ) -> None:
     source_literal = _to_powershell_literal(str(source_path))
     target_literal = _to_powershell_literal(str(target_path))
+    log_literal = _to_powershell_literal(str(log_path))
     script_contents = (
         f"$TargetPid = {pid}\n"
         f"$SourcePath = '{source_literal}'\n"
         f"$TargetPath = '{target_literal}'\n"
+        f"$LogPath = '{log_literal}'\n"
         "$CopySucceeded = $false\n"
+        "\n"
+        "function Write-UpdateLog([string]$Message) {\n"
+        "    $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'\n"
+        "    Add-Content -LiteralPath $LogPath -Value \"$Timestamp [UPDATER] $Message\"\n"
+        "}\n"
+        "\n"
+        "Write-UpdateLog \"Updater script started. targetPid=$TargetPid source=$SourcePath target=$TargetPath\"\n"
         "\n"
         "for ($attempt = 0; $attempt -lt 120; $attempt++) {\n"
         "    if (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)) {\n"
+        "        Write-UpdateLog \"Target process is no longer running.\"\n"
         "        break\n"
         "    }\n"
+        "    Write-UpdateLog \"Waiting for target process to exit. attempt=$attempt\"\n"
         "    Start-Sleep -Seconds 1\n"
         "}\n"
         "\n"
@@ -306,36 +359,47 @@ def _write_updater_script(
         "    try {\n"
         "        Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force\n"
         "        $CopySucceeded = $true\n"
+        "        Write-UpdateLog \"Copied update payload successfully. attempt=$attempt\"\n"
         "        break\n"
         "    } catch {\n"
+        "        Write-UpdateLog \"Copy attempt failed. attempt=$attempt error=$($_.Exception.Message)\"\n"
         "        Start-Sleep -Seconds 1\n"
         "    }\n"
         "}\n"
         "\n"
         "try {\n"
         "    Start-Process -FilePath $TargetPath | Out-Null\n"
+        "    Write-UpdateLog \"Started updated executable successfully.\"\n"
         "} catch {\n"
+        "    Write-UpdateLog \"Failed to start updated executable. error=$($_.Exception.Message)\"\n"
         "}\n"
         "\n"
         "if ($CopySucceeded) {\n"
         "    try {\n"
         "        Remove-Item -LiteralPath $SourcePath -Force -ErrorAction SilentlyContinue\n"
+        "        Write-UpdateLog \"Removed temporary update payload.\"\n"
         "    } catch {\n"
+        "        Write-UpdateLog \"Failed to remove temporary update payload. error=$($_.Exception.Message)\"\n"
         "    }\n"
+        "} else {\n"
+        "    Write-UpdateLog \"Copy never succeeded; target executable was not replaced.\"\n"
         "}\n"
         "\n"
         "$ScriptPath = $MyInvocation.MyCommand.Path\n"
         "Start-Sleep -Milliseconds 200\n"
         "try {\n"
         "    Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue\n"
+        "    Write-UpdateLog \"Updater script finished.\"\n"
         "} catch {\n"
         "}\n"
     )
     script_path.write_text(script_contents, encoding="utf-8")
+    LOGGER.info("Wrote updater script to %s", script_path)
 
 
 def _start_updater_script(script_path: Path) -> bool:
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    LOGGER.info("Starting updater script %s", script_path)
     try:
         subprocess.Popen(
             [
@@ -357,6 +421,7 @@ def _start_updater_script(script_path: Path) -> bool:
         LOGGER.error("Could not start updater script %s: %s", script_path, error)
         return False
 
+    LOGGER.info("Updater script process started successfully: %s", script_path)
     return True
 
 
