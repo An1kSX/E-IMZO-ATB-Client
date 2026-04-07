@@ -22,6 +22,7 @@ from client.ui import show_info_message
 from client.ui.prompts import PromptService, TkPromptService
 
 LOGGER = logging.getLogger(__name__)
+_PORT_CONFLICT_LOGGER = logging.getLogger("client.port_conflict")
 
 
 async def run_app(config: AppConfig) -> None:
@@ -107,8 +108,17 @@ async def _resolve_port_conflict(
     conflict: WebSocketPortInUseError,
 ) -> bool:
     listening_process = find_listening_process_by_port(port=config.ws_port)
+    _PORT_CONFLICT_LOGGER.info(
+        "Port conflict flow started. port=%s initial_process=%s",
+        conflict.port,
+        listening_process,
+    )
     if listening_process is None:
         LOGGER.error("WSS port %s is already in use, but process owner could not be determined.", conflict.port)
+        _PORT_CONFLICT_LOGGER.error(
+            "Port conflict flow aborted because process owner could not be determined. port=%s",
+            conflict.port,
+        )
         show_info_message(
             title="Порт уже занят",
             message=(
@@ -125,6 +135,10 @@ async def _resolve_port_conflict(
             listening_process.name,
             listening_process.pid,
         )
+        _PORT_CONFLICT_LOGGER.warning(
+            "Port conflict belongs to a non-E-IMZO process. process=%s",
+            listening_process,
+        )
         show_info_message(
             title="Порт уже занят",
             message=(
@@ -139,11 +153,22 @@ async def _resolve_port_conflict(
             process_name=listening_process.name,
             port=conflict.port,
         )
+        _PORT_CONFLICT_LOGGER.info(
+            "Port conflict dialog resolved. process=%s terminate_process=%s remove_from_autostart=%s",
+            listening_process,
+            resolution.terminate_process,
+            resolution.remove_from_autostart,
+        )
         if not resolution.terminate_process:
+            _PORT_CONFLICT_LOGGER.info("User cancelled the port conflict flow.")
             return False
 
         if resolution.remove_from_autostart:
             removed_autostart_entries = disable_known_eimzo_autostart()
+            _PORT_CONFLICT_LOGGER.info(
+                "Requested E-IMZO autostart removal. removed_entries=%s",
+                removed_autostart_entries,
+            )
             if removed_autostart_entries == 0:
                 LOGGER.warning("Could not find E-IMZO auto-start entries to remove.")
                 show_info_message(
@@ -155,10 +180,25 @@ async def _resolve_port_conflict(
                 )
 
         stopped = terminate_related_eimzo_processes(listening_process=listening_process)
+        _PORT_CONFLICT_LOGGER.info(
+            "terminate_related_eimzo_processes finished. process=%s stopped=%s",
+            listening_process,
+            stopped,
+        )
         if not stopped:
             stopped = terminate_process_by_pid(pid=listening_process.pid)
+            _PORT_CONFLICT_LOGGER.info(
+                "Direct terminate_process_by_pid fallback finished. pid=%s stopped=%s",
+                listening_process.pid,
+                stopped,
+            )
         if stopped:
             port_released = await _wait_for_port_release(port=config.ws_port)
+            _PORT_CONFLICT_LOGGER.info(
+                "Port release wait finished. port=%s released=%s",
+                config.ws_port,
+                port_released,
+            )
             if not port_released:
                 LOGGER.warning(
                     "Requested E-IMZO shutdown succeeded for PID %s, but WSS port %s is still busy.",
@@ -166,6 +206,10 @@ async def _resolve_port_conflict(
                     conflict.port,
                 )
                 refreshed_process = find_listening_process_by_port(port=config.ws_port)
+                _PORT_CONFLICT_LOGGER.warning(
+                    "Port is still busy after stop attempt. refreshed_process=%s",
+                    refreshed_process,
+                )
                 if refreshed_process is not None and is_eimzo_process(refreshed_process):
                     show_info_message(
                         title="E-IMZO всё ещё запущен",
@@ -202,12 +246,20 @@ async def _resolve_port_conflict(
                 listening_process.name,
                 listening_process.pid,
             )
+            _PORT_CONFLICT_LOGGER.info(
+                "Port conflict flow succeeded. Retrying WSS startup. process=%s",
+                listening_process,
+            )
             return True
 
         LOGGER.error(
             "User approved stopping %s, but process PID %s could not be terminated.",
             listening_process.name,
             listening_process.pid,
+        )
+        _PORT_CONFLICT_LOGGER.error(
+            "Process stop attempt failed. process=%s",
+            listening_process,
         )
         show_info_message(
             title="Не удалось закрыть E-IMZO",
@@ -217,8 +269,13 @@ async def _resolve_port_conflict(
             ),
         )
         refreshed_process = find_listening_process_by_port(port=config.ws_port)
+        _PORT_CONFLICT_LOGGER.info(
+            "Refreshed process after failed stop attempt. refreshed_process=%s",
+            refreshed_process,
+        )
         if refreshed_process is None:
             await asyncio.sleep(1.0)
+            _PORT_CONFLICT_LOGGER.info("No refreshed process found after failed stop attempt; continuing loop.")
             continue
         listening_process = refreshed_process
 
@@ -230,9 +287,17 @@ async def _wait_for_port_release(
     poll_interval_seconds: float = 0.25,
 ) -> bool:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
+    _PORT_CONFLICT_LOGGER.info(
+        "Waiting for port release. port=%s timeout_seconds=%s poll_interval_seconds=%s",
+        port,
+        timeout_seconds,
+        poll_interval_seconds,
+    )
     while True:
         if not is_port_in_use(port=port):
+            _PORT_CONFLICT_LOGGER.info("Port is no longer in use. port=%s", port)
             return True
         if asyncio.get_running_loop().time() >= deadline:
+            _PORT_CONFLICT_LOGGER.warning("Port release wait timed out. port=%s", port)
             return False
         await asyncio.sleep(poll_interval_seconds)

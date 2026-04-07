@@ -128,6 +128,7 @@ def disable_windows_run_entries_by_command_fragments(*, fragments: Sequence[str]
 
 
 def disable_known_eimzo_autostart() -> int:
+    LOGGER.info("Starting direct E-IMZO autostart cleanup.")
     removed_count = disable_windows_run_entries_by_command_fragments(
         fragments=(
             "e-imzo.exe",
@@ -138,7 +139,11 @@ def disable_known_eimzo_autostart() -> int:
             r"c:\program files (x86)\e-imzo",
         ),
     )
-    removed_count += _delete_known_eimzo_startup_links()
+    LOGGER.info("Generic autostart cleanup removed %s entries.", removed_count)
+    known_link_removed = _delete_known_eimzo_startup_links()
+    LOGGER.info("Known E-IMZO startup link cleanup removed %s entries.", known_link_removed)
+    removed_count += known_link_removed
+    LOGGER.info("Finished direct E-IMZO autostart cleanup. total_removed=%s", removed_count)
     return removed_count
 
 
@@ -294,8 +299,10 @@ def _delete_known_eimzo_startup_links() -> int:
         candidate_paths.add(startup_dir / "E-IMZO.lnk")
 
     for path in candidate_paths:
+        LOGGER.info("Checking known E-IMZO startup link candidate: %s exists=%s", path, path.exists())
         if _delete_path_with_optional_elevation(path):
             removed_count += 1
+            LOGGER.info("Removed known E-IMZO startup link: %s", path)
 
     return removed_count
 
@@ -361,8 +368,10 @@ def _windows_creation_flags() -> int:
 def _delete_path_with_optional_elevation(path: Path) -> bool:
     try:
         path.unlink()
+        LOGGER.info("Removed path without elevation: %s", path)
         return True
     except FileNotFoundError:
+        LOGGER.info("Path was already absent: %s", path)
         return False
     except PermissionError:
         LOGGER.warning("Permission denied while removing %s. Requesting elevation.", path)
@@ -397,7 +406,9 @@ def _delete_path_via_elevated_powershell(path: Path) -> bool:
         )
         return False
 
-    return not path.exists()
+    removed = not path.exists()
+    LOGGER.info("Elevated removal finished for %s. removed=%s", path, removed)
+    return removed
 
 
 def _load_winreg():

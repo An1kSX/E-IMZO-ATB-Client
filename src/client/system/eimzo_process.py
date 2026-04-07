@@ -47,24 +47,29 @@ def find_listening_process_by_port(*, port: int) -> ListeningProcess | None:
 
     pid = _resolve_windows_pid_by_port(port=port)
     if pid is None:
+        LOGGER.info("No listening process found for port %s.", port)
         return None
 
     process_snapshot = _resolve_windows_process_snapshot()
     for process in process_snapshot:
         if process.pid != pid:
             continue
-        return ListeningProcess(
+        listening_process = ListeningProcess(
             pid=process.pid,
             name=process.name,
             executable_path=process.executable_path,
             command_line=process.command_line,
         )
+        LOGGER.info("Resolved listening process for port %s: %s", port, listening_process)
+        return listening_process
 
     name = _resolve_windows_process_name(pid=pid)
     if name is None:
         return None
 
-    return ListeningProcess(pid=pid, name=name)
+    listening_process = ListeningProcess(pid=pid, name=name)
+    LOGGER.info("Resolved listening process for port %s via tasklist fallback: %s", port, listening_process)
+    return listening_process
 
 
 def terminate_process_by_pid(*, pid: int) -> bool:
@@ -72,6 +77,7 @@ def terminate_process_by_pid(*, pid: int) -> bool:
         return False
 
     if _stop_process_via_powershell(pid=pid):
+        LOGGER.info("Successfully terminated PID %s via Stop-Process.", pid)
         return True
 
     completed = subprocess.run(
@@ -82,6 +88,7 @@ def terminate_process_by_pid(*, pid: int) -> bool:
         creationflags=_windows_creation_flags(),
     )
     if completed.returncode == 0:
+        LOGGER.info("Successfully terminated PID %s via taskkill.", pid)
         return True
 
     LOGGER.warning(
@@ -105,6 +112,11 @@ def terminate_related_eimzo_processes(*, listening_process: ListeningProcess) ->
     ]
     if not target_pids:
         target_pids = [listening_process.pid]
+    LOGGER.info(
+        "Attempting to terminate related E-IMZO processes. listening_process=%s target_pids=%s",
+        listening_process,
+        target_pids,
+    )
 
     terminated_any = False
     current_pid = os.getpid()
@@ -114,6 +126,11 @@ def terminate_related_eimzo_processes(*, listening_process: ListeningProcess) ->
         if terminate_process_by_pid(pid=pid):
             terminated_any = True
 
+    LOGGER.info(
+        "Finished terminating related E-IMZO processes. listening_process=%s terminated_any=%s",
+        listening_process,
+        terminated_any,
+    )
     return terminated_any
 
 
@@ -148,6 +165,7 @@ def _resolve_windows_pid_by_port(*, port: int) -> int | None:
     for line in completed.stdout.splitlines():
         pid = _extract_pid_from_netstat_line(line=line, port=port)
         if pid is not None:
+            LOGGER.info("Resolved PID %s for listening port %s via netstat.", pid, port)
             return pid
 
     return None
@@ -256,6 +274,7 @@ def _resolve_windows_process_snapshot() -> list[WindowsProcessInfo]:
             )
         )
 
+    LOGGER.info("Resolved Windows process snapshot. process_count=%s", len(result))
     return result
 
 

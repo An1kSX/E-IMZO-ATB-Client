@@ -4,9 +4,12 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+import logging
 from typing import Protocol
 
 from client.domain.commands import ProxyCommand
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,12 +321,23 @@ def _show_port_conflict_dialog(
 
         def cancel(self, event=None):  # type: ignore[override]
             self.result = PortConflictResolution(terminate_process=False, remove_from_autostart=False)
+            LOGGER.info(
+                "Port conflict dialog cancelled by user. process_name=%s port=%s",
+                process_name,
+                port,
+            )
             return super().cancel(event)
 
         def _confirm_terminate(self) -> None:
             self.result = PortConflictResolution(
                 terminate_process=True,
                 remove_from_autostart=bool(self._remove_from_autostart_var.get()),
+            )
+            LOGGER.info(
+                "Port conflict dialog confirmed by user. process_name=%s port=%s remove_from_autostart=%s",
+                process_name,
+                port,
+                bool(self._remove_from_autostart_var.get()),
             )
             self.ok()
 
