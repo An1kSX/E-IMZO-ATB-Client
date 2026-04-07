@@ -16,6 +16,11 @@ class _ApplicationLogFilter(logging.Filter):
         return is_application_log and (record.levelno >= logging.ERROR or is_user_action)
 
 
+class _DetailedApplicationLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith("client.")
+
+
 def configure_logging(
     level: str,
     *,
@@ -65,7 +70,7 @@ def configure_logging(
 
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
-        file_handler.addFilter(_ApplicationLogFilter())
+        file_handler.addFilter(_DetailedApplicationLogFilter())
         root_logger.addHandler(file_handler)
         _LOGGER.info("Detailed file logging is enabled at %s", candidate_dir / "eimzo-atb-client.log")
         return

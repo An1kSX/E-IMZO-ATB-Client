@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import logging
 import os
 from pathlib import Path
@@ -66,6 +67,9 @@ def disable_windows_run_entries_by_command_fragment(*, fragment: str) -> int:
         removed_count += _delete_windows_startup_folder_entries_matching(
             fragments=(normalized_fragment,),
         )
+        removed_count += _delete_windows_scheduled_tasks_matching(
+            fragments=(normalized_fragment,),
+        )
     except OSError:
         LOGGER.exception("Could not remove Windows auto-start entries for fragment %r.", fragment)
         return 0
@@ -100,6 +104,9 @@ def disable_windows_run_entries_by_command_fragments(*, fragments: Sequence[str]
             )
         )
         removed_count += _delete_windows_startup_folder_entries_matching(
+            fragments=normalized_fragments,
+        )
+        removed_count += _delete_windows_scheduled_tasks_matching(
             fragments=normalized_fragments,
         )
     except OSError:
@@ -259,6 +266,64 @@ def _iter_windows_startup_directories() -> list[Path]:
         directories.append(Path(program_data) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "StartUp")
 
     return directories
+
+
+def _delete_windows_scheduled_tasks_matching(*, fragments: Sequence[str]) -> int:
+    completed = subprocess.run(
+        ["schtasks", "/Query", "/V", "/FO", "CSV", "/NH"],
+        check=False,
+        capture_output=True,
+        text=True,
+        creationflags=_windows_creation_flags(),
+    )
+    if completed.returncode != 0:
+        LOGGER.warning(
+            "Could not inspect Windows scheduled tasks. returncode=%s stderr=%s",
+            completed.returncode,
+            (completed.stderr or "").strip(),
+        )
+        return 0
+
+    removed_count = 0
+    reader = csv.reader(line for line in completed.stdout.splitlines() if line.strip())
+    task_names: list[str] = []
+    for row in reader:
+        if not row:
+            continue
+        task_name = row[0].strip()
+        if not task_name:
+            continue
+        normalized_row_values = [value.strip().casefold() for value in row if value.strip()]
+        if any(
+            fragment in value
+            for fragment in fragments
+            for value in normalized_row_values
+        ):
+            task_names.append(task_name)
+
+    for task_name in task_names:
+        delete_completed = subprocess.run(
+            ["schtasks", "/Delete", "/TN", task_name, "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            creationflags=_windows_creation_flags(),
+        )
+        if delete_completed.returncode == 0:
+            removed_count += 1
+            continue
+        LOGGER.warning(
+            "Could not remove scheduled task %s. returncode=%s stderr=%s",
+            task_name,
+            delete_completed.returncode,
+            (delete_completed.stderr or "").strip(),
+        )
+
+    return removed_count
+
+
+def _windows_creation_flags() -> int:
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _load_winreg():

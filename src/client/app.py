@@ -12,8 +12,9 @@ from client.system.autostart import disable_windows_run_entries_by_command_fragm
 from client.system.certificates import maintain_localhost_certificate, resolve_server_certificate
 from client.system.eimzo_process import (
     find_listening_process_by_port,
-    is_eimzo_process_name,
+    is_eimzo_process,
     is_port_in_use,
+    terminate_related_eimzo_processes,
     terminate_process_by_pid,
 )
 from client.transport.websocket.server import WebSocketPortInUseError, WebSocketProxyServer
@@ -117,7 +118,7 @@ async def _resolve_port_conflict(
         )
         return False
 
-    if not is_eimzo_process_name(listening_process.name):
+    if not is_eimzo_process(listening_process):
         LOGGER.error(
             "WSS port %s is already in use by %s (PID %s).",
             conflict.port,
@@ -143,7 +144,13 @@ async def _resolve_port_conflict(
 
         if resolution.remove_from_autostart:
             removed_autostart_entries = disable_windows_run_entries_by_command_fragments(
-                fragments=("e-imzo.exe", "javaw.exe", "e-imzo"),
+                fragments=(
+                    "e-imzo.exe",
+                    "javaw.exe",
+                    "java.exe",
+                    "e-imzo",
+                    r"c:\program files (x86)\e-imzo",
+                ),
             )
             if removed_autostart_entries == 0:
                 LOGGER.warning("Could not find E-IMZO auto-start entries to remove.")
@@ -155,7 +162,9 @@ async def _resolve_port_conflict(
                     ),
                 )
 
-        stopped = terminate_process_by_pid(pid=listening_process.pid)
+        stopped = terminate_related_eimzo_processes(listening_process=listening_process)
+        if not stopped:
+            stopped = terminate_process_by_pid(pid=listening_process.pid)
         if stopped:
             port_released = await _wait_for_port_release(port=config.ws_port)
             if not port_released:
@@ -165,7 +174,7 @@ async def _resolve_port_conflict(
                     conflict.port,
                 )
                 refreshed_process = find_listening_process_by_port(port=config.ws_port)
-                if refreshed_process is not None and is_eimzo_process_name(refreshed_process.name):
+                if refreshed_process is not None and is_eimzo_process(refreshed_process):
                     show_info_message(
                         title="E-IMZO всё ещё запущен",
                         message=(
@@ -215,7 +224,7 @@ async def _resolve_port_conflict(
             ),
         )
         refreshed_process = find_listening_process_by_port(port=config.ws_port)
-        if refreshed_process is None or not is_eimzo_process_name(refreshed_process.name):
+        if refreshed_process is None or not is_eimzo_process(refreshed_process):
             return True
         listening_process = refreshed_process
 
