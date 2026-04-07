@@ -203,7 +203,8 @@ async def _resolve_port_conflict(
                             "Закройте этот процесс и попробуйте снова."
                         ),
                     )
-                return False
+                listening_process = refreshed_process or listening_process
+                continue
 
             LOGGER.info(
                 "Terminated %s (PID %s) and will retry WSS startup.",
@@ -225,8 +226,9 @@ async def _resolve_port_conflict(
             ),
         )
         refreshed_process = find_listening_process_by_port(port=config.ws_port)
-        if refreshed_process is None or not is_eimzo_process(refreshed_process):
-            return True
+        if refreshed_process is None:
+            await asyncio.sleep(1.0)
+            continue
         listening_process = refreshed_process
 
 
