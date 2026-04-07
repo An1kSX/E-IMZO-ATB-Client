@@ -106,7 +106,7 @@ def maybe_start_self_update_from_github_release_with_notification(
     updates_dir = config.runtime_dir / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
     downloaded_file = updates_dir / f"{config.auto_update_asset_name}.new"
-    updater_script = updates_dir / "apply-update.ps1"
+    updater_script = updates_dir / "apply-update.cmd"
     updater_log_file = updates_dir / "apply-update.log"
     updater_start_marker = updates_dir / "apply-update.started"
     LOGGER.info(
@@ -343,76 +343,71 @@ def _write_updater_script(
     log_path: Path,
     start_marker_path: Path,
 ) -> None:
-    source_literal = _to_powershell_literal(str(source_path))
-    target_literal = _to_powershell_literal(str(target_path))
-    log_literal = _to_powershell_literal(str(log_path))
-    start_marker_literal = _to_powershell_literal(str(start_marker_path))
+    source_literal = _to_cmd_literal(str(source_path))
+    target_literal = _to_cmd_literal(str(target_path))
+    log_literal = _to_cmd_literal(str(log_path))
+    start_marker_literal = _to_cmd_literal(str(start_marker_path))
     script_contents = (
-        f"$TargetPid = {pid}\n"
-        f"$SourcePath = '{source_literal}'\n"
-        f"$TargetPath = '{target_literal}'\n"
-        f"$LogPath = '{log_literal}'\n"
-        f"$StartMarkerPath = '{start_marker_literal}'\n"
-        "$CopySucceeded = $false\n"
+        "@echo off\n"
+        "setlocal EnableExtensions EnableDelayedExpansion\n"
+        f"set \"TargetPid={pid}\"\n"
+        f"set \"SourcePath={source_literal}\"\n"
+        f"set \"TargetPath={target_literal}\"\n"
+        f"set \"LogPath={log_literal}\"\n"
+        f"set \"StartMarkerPath={start_marker_literal}\"\n"
+        "set \"CopySucceeded=0\"\n"
         "\n"
-        "function Write-UpdateLog([string]$Message) {\n"
-        "    $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'\n"
-        "    Add-Content -LiteralPath $LogPath -Value \"$Timestamp [UPDATER] $Message\"\n"
-        "}\n"
+        "> \"%StartMarkerPath%\" echo started\n"
+        "call :WriteUpdateLog Updater script started. targetPid=%TargetPid% source=%SourcePath% target=%TargetPath%\n"
         "\n"
-        "try {\n"
-        "    Set-Content -LiteralPath $StartMarkerPath -Value 'started' -Encoding UTF8\n"
-        "} catch {\n"
-        "}\n"
+        "for /L %%I in (0,1,119) do (\n"
+        "    tasklist /FI \"PID eq %TargetPid%\" 2>NUL | findstr /R /C:\"\\<%TargetPid%\\>\" >NUL\n"
+        "    if errorlevel 1 (\n"
+        "        call :WriteUpdateLog Target process is no longer running.\n"
+        "        goto AfterWait\n"
+        "    )\n"
+        "    call :WriteUpdateLog Waiting for target process to exit. attempt=%%I\n"
+        "    timeout /t 1 /nobreak >NUL\n"
+        ")\n"
         "\n"
-        "Write-UpdateLog \"Updater script started. targetPid=$TargetPid source=$SourcePath target=$TargetPath\"\n"
+        ":AfterWait\n"
+        "for /L %%I in (0,1,39) do (\n"
+        "    copy /Y \"%SourcePath%\" \"%TargetPath%\" >NUL 2>&1\n"
+        "    if not errorlevel 1 (\n"
+        "        set \"CopySucceeded=1\"\n"
+        "        call :WriteUpdateLog Copied update payload successfully. attempt=%%I\n"
+        "        goto AfterCopy\n"
+        "    )\n"
+        "    call :WriteUpdateLog Copy attempt failed. attempt=%%I error=!errorlevel!\n"
+        "    timeout /t 1 /nobreak >NUL\n"
+        ")\n"
         "\n"
-        "for ($attempt = 0; $attempt -lt 120; $attempt++) {\n"
-        "    if (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)) {\n"
-        "        Write-UpdateLog \"Target process is no longer running.\"\n"
-        "        break\n"
-        "    }\n"
-        "    Write-UpdateLog \"Waiting for target process to exit. attempt=$attempt\"\n"
-        "    Start-Sleep -Seconds 1\n"
-        "}\n"
+        ":AfterCopy\n"
+        "start \"\" \"%TargetPath%\" >NUL 2>&1\n"
+        "if errorlevel 1 (\n"
+        "    call :WriteUpdateLog Failed to start updated executable. error=%errorlevel%\n"
+        ") else (\n"
+        "    call :WriteUpdateLog Started updated executable successfully.\n"
+        ")\n"
         "\n"
-        "for ($attempt = 0; $attempt -lt 40; $attempt++) {\n"
-        "    try {\n"
-        "        Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force\n"
-        "        $CopySucceeded = $true\n"
-        "        Write-UpdateLog \"Copied update payload successfully. attempt=$attempt\"\n"
-        "        break\n"
-        "    } catch {\n"
-        "        Write-UpdateLog \"Copy attempt failed. attempt=$attempt error=$($_.Exception.Message)\"\n"
-        "        Start-Sleep -Seconds 1\n"
-        "    }\n"
-        "}\n"
+        "if \"%CopySucceeded%\"==\"1\" (\n"
+        "    del /F /Q \"%SourcePath%\" >NUL 2>&1\n"
+        "    if errorlevel 1 (\n"
+        "        call :WriteUpdateLog Failed to remove temporary update payload. error=%errorlevel%\n"
+        "    ) else (\n"
+        "        call :WriteUpdateLog Removed temporary update payload.\n"
+        "    )\n"
+        ") else (\n"
+        "    call :WriteUpdateLog Copy never succeeded; target executable was not replaced.\n"
+        ")\n"
         "\n"
-        "try {\n"
-        "    Start-Process -FilePath $TargetPath | Out-Null\n"
-        "    Write-UpdateLog \"Started updated executable successfully.\"\n"
-        "} catch {\n"
-        "    Write-UpdateLog \"Failed to start updated executable. error=$($_.Exception.Message)\"\n"
-        "}\n"
+        "call :WriteUpdateLog Updater script finished.\n"
+        "start \"\" /B cmd /C del /F /Q \"%~f0\" >NUL 2>&1\n"
+        "exit /b 0\n"
         "\n"
-        "if ($CopySucceeded) {\n"
-        "    try {\n"
-        "        Remove-Item -LiteralPath $SourcePath -Force -ErrorAction SilentlyContinue\n"
-        "        Write-UpdateLog \"Removed temporary update payload.\"\n"
-        "    } catch {\n"
-        "        Write-UpdateLog \"Failed to remove temporary update payload. error=$($_.Exception.Message)\"\n"
-        "    }\n"
-        "} else {\n"
-        "    Write-UpdateLog \"Copy never succeeded; target executable was not replaced.\"\n"
-        "}\n"
-        "\n"
-        "$ScriptPath = $MyInvocation.MyCommand.Path\n"
-        "Start-Sleep -Milliseconds 200\n"
-        "try {\n"
-        "    Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue\n"
-        "    Write-UpdateLog \"Updater script finished.\"\n"
-        "} catch {\n"
-        "}\n"
+        ":WriteUpdateLog\n"
+        ">> \"%LogPath%\" echo [%date% %time%] [UPDATER] %*\n"
+        "exit /b 0\n"
     )
     script_path.write_text(script_contents, encoding="utf-8")
     LOGGER.info("Wrote updater script to %s", script_path)
@@ -424,12 +419,8 @@ def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
     try:
         process = subprocess.Popen(
             [
-                "powershell.exe",
-                "-NoLogo",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
+                "cmd.exe",
+                "/c",
                 str(script_path),
             ],
             creationflags=creation_flags,
@@ -462,7 +453,5 @@ def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
         start_marker_path,
     )
     return False
-
-
-def _to_powershell_literal(value: str) -> str:
-    return value.replace("'", "''")
+def _to_cmd_literal(value: str) -> str:
+    return value.replace('"', '""')
