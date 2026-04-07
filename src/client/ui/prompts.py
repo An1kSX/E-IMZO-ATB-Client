@@ -320,12 +320,13 @@ def _show_port_conflict_dialog(
             self.bind("<Escape>", self.cancel)
 
         def cancel(self, event=None):  # type: ignore[override]
-            self.result = PortConflictResolution(terminate_process=False, remove_from_autostart=False)
-            LOGGER.info(
-                "Port conflict dialog cancelled by user. process_name=%s port=%s",
-                process_name,
-                port,
-            )
+            if not self.result.terminate_process:
+                self.result = PortConflictResolution(terminate_process=False, remove_from_autostart=False)
+                LOGGER.info(
+                    "Port conflict dialog cancelled by user. process_name=%s port=%s",
+                    process_name,
+                    port,
+                )
             return super().cancel(event)
 
         def _confirm_terminate(self) -> None:
