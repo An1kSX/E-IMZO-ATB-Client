@@ -1,3 +1,6 @@
 """E-IMZO ATB WebSocket client."""
 
-__version__ = "0.1.0"
+try:
+    from client._build_version import __version__
+except ImportError:
+    __version__ = "0.0.0-dev"

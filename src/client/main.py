@@ -5,8 +5,10 @@ import os
 import logging
 import platform
 from pathlib import Path
+import sys
 import threading
 
+from client import __version__
 from client.app import run_app
 from client.bootstrap.config import (
     AppConfig,
@@ -43,6 +45,12 @@ def main() -> None:
         config.log_level,
         runtime_dir=config.runtime_dir,
         log_dir=config.log_dir,
+    )
+    logging.getLogger(__name__).info(
+        "Starting E-IMZO ATB Client. version=%s executable=%s cwd=%s",
+        __version__,
+        Path(sys.executable).resolve(),
+        Path.cwd(),
     )
     sync_windows_auto_start(enabled=config.windows_auto_start_enabled)
     instance_lock = SingleInstanceLock(config.runtime_dir / "instance.lock")

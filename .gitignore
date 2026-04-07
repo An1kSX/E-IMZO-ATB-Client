@@ -9,3 +9,4 @@ dist/
 tests/
 *.egg-info/
 build/pyinstaller/
+src/client/_build_version.py
