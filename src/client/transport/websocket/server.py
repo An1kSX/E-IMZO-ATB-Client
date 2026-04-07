@@ -151,7 +151,7 @@ class WebSocketProxyServer:
                 remote_address,
                 extra=_USER_ACTION_LOG_EXTRA,
             )
-            response = await self._endpoint_proxy.forward(command)
+            response = await self._endpoint_proxy.forward(command, origin=origin)
             await websocket.send(response.to_websocket_payload())
             await websocket.close(
                 code=_CLOSE_CODE_NORMAL_CLOSURE,

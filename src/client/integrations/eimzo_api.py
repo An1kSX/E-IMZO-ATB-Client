@@ -86,6 +86,7 @@ class HttpProxyResponse:
 class PreparedRequest:
     arguments: Any
     sensitive_identity: str | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,11 +136,18 @@ class EimzoApiClient:
             LOGGER.warning("Could not authenticate with E-IMZO API during startup: %s", error)
             return False
 
-    async def forward(self, command: ProxyCommand) -> ProxyResponse:
+    async def forward(self, command: ProxyCommand, *, origin: str | None = None) -> ProxyResponse:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
         key_name = _extract_key_name_from_load_key_command(command)
-        prepared_request = self._build_request(command)
+        prepared_request = self._build_request(command, origin=origin)
         command_label = _format_command_label(plugin=command.plugin, name=command.name)
+
+        if prepared_request.error_message is not None:
+            LOGGER.warning(
+                "Rejected %s before forwarding because the key identity is missing.",
+                command_label,
+            )
+            return _failed_proxy_response(prepared_request.error_message)
 
         if prepared_request.sensitive_identity is not None:
             approved = await self._prompt_service.confirm_sensitive_operation(
@@ -186,7 +194,7 @@ class EimzoApiClient:
                     access_token=token,
                 )
 
-            self._remember_key_identity(key_name=key_name, response=response.proxy_response)
+            self._remember_key_identity(key_name=key_name, response=response.proxy_response, origin=origin)
             return response.proxy_response
         except _UpstreamRequestError as error:
             LOGGER.warning("E-IMZO API request failed for %s: %s", command_label, error)
@@ -201,10 +209,10 @@ class EimzoApiClient:
         segments.append(str(name).strip("/"))
         return "/".join(segment for segment in segments if segment)
 
-    def get_identity_by_key_id(self, key_id: str) -> str | None:
-        return self._key_identity_store.get(key_id)
+    def get_identity_by_key_id(self, key_id: str, *, origin: str | None = None) -> str | None:
+        return self._key_identity_store.get(key_id, origin=origin)
 
-    def _remember_key_identity(self, *, key_name: str | None, response: ProxyResponse) -> None:
+    def _remember_key_identity(self, *, key_name: str | None, response: ProxyResponse, origin: str | None) -> None:
         if key_name is None:
             return
 
@@ -212,14 +220,14 @@ class EimzoApiClient:
         if key_id is None:
             return
 
-        identity = self._key_identity_store.remember(key_id=key_id, key_name=key_name)
+        identity = self._key_identity_store.remember(key_id=key_id, key_name=key_name, origin=origin)
         if identity is None:
             LOGGER.warning("Could not extract INN/PINFL from key name %r for keyId %s", key_name, key_id)
             return
 
-        LOGGER.info("Stored keyId to INN/PINFL mapping: %s -> %s", key_id, identity)
+        LOGGER.info("Stored keyId to INN/PINFL mapping: origin=%s keyId=%s -> %s", origin, key_id, identity)
 
-    def _build_request(self, command: ProxyCommand) -> PreparedRequest:
+    def _build_request(self, command: ProxyCommand, *, origin: str | None = None) -> PreparedRequest:
         arguments = command.arguments
         if not command.has_arguments:
             return PreparedRequest(arguments=arguments)
@@ -232,10 +240,16 @@ class EimzoApiClient:
             return PreparedRequest(arguments=arguments)
 
         command_label = _format_command_label(plugin=command.plugin, name=command.name)
-        identity = self._key_identity_store.get(key_id)
+        identity = self._key_identity_store.get(key_id, origin=origin)
         if identity is None:
-            LOGGER.warning("No stored INN/PINFL found for keyId %s during %s", key_id, command_label)
-            return PreparedRequest(arguments=arguments)
+            LOGGER.warning("No stored INN/PINFL found for origin=%s keyId=%s during %s", origin, key_id, command_label)
+            return PreparedRequest(
+                arguments=arguments,
+                error_message=(
+                    "Не удалось определить ИНН/ПИНФЛ для выбранного ключа. "
+                    "Загрузите ключ заново и повторите операцию."
+                ),
+            )
 
         request_arguments = list(arguments)
         if not request_arguments or request_arguments[-1] != identity:
@@ -429,6 +443,12 @@ def _extract_key_name_from_load_key_command(command: ProxyCommand) -> str | None
         return None
 
     arguments = command.arguments
+    if isinstance(arguments, dict):
+        for key in ("key_name", "keyName", "name", "alias"):
+            key_name = arguments.get(key)
+            if isinstance(key_name, str) and key_name.strip():
+                return key_name.strip()
+
     if isinstance(arguments, (list, tuple)) and len(arguments) >= 3:
         key_name = arguments[2]
         if isinstance(key_name, str) and key_name.strip():

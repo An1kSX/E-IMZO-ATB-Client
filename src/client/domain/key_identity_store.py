@@ -2,42 +2,47 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
+from typing import TypeAlias
 
 INN_LENGTH = 9
 PINFL_LENGTH = 14
 PINFL_KEY_NAME_LENGTH = 20
-MAX_STORED_KEY_IDS = 100
+MAX_STORED_KEY_IDS = 1000
+_KeyScope: TypeAlias = tuple[str | None, str]
 
 
 class KeyIdentityStore:
     def __init__(self, *, max_entries: int = MAX_STORED_KEY_IDS) -> None:
         self._max_entries = max_entries
-        self._identities_by_key_id: OrderedDict[str, str] = OrderedDict()
-        self._key_ids_by_identity: dict[str, str] = {}
+        self._identities_by_scoped_key_id: OrderedDict[_KeyScope, str] = OrderedDict()
+        self._scoped_key_ids_by_identity: dict[_KeyScope, _KeyScope] = {}
 
-    def remember(self, *, key_id: str, key_name: str) -> str | None:
+    def remember(self, *, key_id: str, key_name: str, origin: str | None = None) -> str | None:
         identity = extract_identity_from_key_name(key_name)
         if identity is None:
             return None
 
-        existing_key_id = self._key_ids_by_identity.get(identity)
-        if existing_key_id is not None and existing_key_id != key_id:
-            self._identities_by_key_id.pop(existing_key_id, None)
+        scoped_key_id = (origin, key_id)
+        scoped_identity = (origin, identity)
+        existing_scoped_key_id = self._scoped_key_ids_by_identity.get(scoped_identity)
+        if existing_scoped_key_id is not None and existing_scoped_key_id != scoped_key_id:
+            self._identities_by_scoped_key_id.pop(existing_scoped_key_id, None)
 
-        self._identities_by_key_id.pop(key_id, None)
-        self._identities_by_key_id[key_id] = identity
-        self._key_ids_by_identity[identity] = key_id
+        self._identities_by_scoped_key_id.pop(scoped_key_id, None)
+        self._identities_by_scoped_key_id[scoped_key_id] = identity
+        self._scoped_key_ids_by_identity[scoped_identity] = scoped_key_id
         self._trim_to_capacity()
         return identity
 
-    def get(self, key_id: str) -> str | None:
-        return self._identities_by_key_id.get(key_id)
+    def get(self, key_id: str, *, origin: str | None = None) -> str | None:
+        return self._identities_by_scoped_key_id.get((origin, key_id))
 
     def _trim_to_capacity(self) -> None:
-        while len(self._identities_by_key_id) > self._max_entries:
-            oldest_key_id, oldest_identity = self._identities_by_key_id.popitem(last=False)
-            if self._key_ids_by_identity.get(oldest_identity) == oldest_key_id:
-                self._key_ids_by_identity.pop(oldest_identity, None)
+        while len(self._identities_by_scoped_key_id) > self._max_entries:
+            oldest_scoped_key_id, oldest_identity = self._identities_by_scoped_key_id.popitem(last=False)
+            scoped_identity = (oldest_scoped_key_id[0], oldest_identity)
+            if self._scoped_key_ids_by_identity.get(scoped_identity) == oldest_scoped_key_id:
+                self._scoped_key_ids_by_identity.pop(scoped_identity, None)
 
 
 def extract_identity_from_key_name(key_name: str) -> str | None:
