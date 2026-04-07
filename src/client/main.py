@@ -5,6 +5,7 @@ import os
 import logging
 import platform
 from pathlib import Path
+import threading
 
 from client.app import run_app
 from client.bootstrap.config import (
@@ -16,6 +17,7 @@ from client.bootstrap.config import (
 from client.bootstrap.logging import configure_logging
 from client.system.app_icon import resolve_app_icon_path
 from client.system.autostart import sync_windows_auto_start
+from client.system.eimzo_process import launch_installed_eimzo
 from client.system.single_instance import SingleInstanceLock
 from client.system.tray_icon import WindowsTrayIcon
 from client.system.updates import (
@@ -80,8 +82,14 @@ async def _run_with_system_tray(config: AppConfig) -> None:
 
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
+    launch_eimzo_after_shutdown = threading.Event()
     tray_icon = WindowsTrayIcon(
         on_exit_request=lambda: loop.call_soon_threadsafe(shutdown_event.set),
+        on_exit_and_launch_eimzo_request=lambda: _request_exit_and_launch_eimzo(
+            loop=loop,
+            shutdown_event=shutdown_event,
+            launch_eimzo_after_shutdown=launch_eimzo_after_shutdown,
+        ),
         on_configure_api_url_request=lambda: _configure_saved_api_url(config.runtime_dir),
         on_reset_api_url_request=lambda: _reset_saved_api_url(config.runtime_dir),
         icon_path=resolve_app_icon_path(),
@@ -141,7 +149,11 @@ async def _run_with_system_tray(config: AppConfig) -> None:
                     _TRAY_SHUTDOWN_TIMEOUT_SECONDS,
                 )
                 tray_icon.stop()
+                if launch_eimzo_after_shutdown.is_set():
+                    _launch_eimzo_after_shutdown()
                 _force_process_exit(0)
+            if launch_eimzo_after_shutdown.is_set():
+                _launch_eimzo_after_shutdown()
             return
 
         shutdown_task.cancel()
@@ -202,6 +214,31 @@ def _install_windows_event_loop() -> None:
 
 def _force_process_exit(code: int) -> None:
     os._exit(code)
+
+
+def _request_exit_and_launch_eimzo(
+    *,
+    loop: asyncio.AbstractEventLoop,
+    shutdown_event: asyncio.Event,
+    launch_eimzo_after_shutdown: threading.Event,
+) -> None:
+    launch_eimzo_after_shutdown.set()
+    loop.call_soon_threadsafe(shutdown_event.set)
+
+
+def _launch_eimzo_after_shutdown() -> None:
+    if launch_installed_eimzo():
+        logging.getLogger(__name__).info("Launched E-IMZO after tray shutdown request.")
+        return
+
+    logging.getLogger(__name__).error("Failed to launch E-IMZO after tray shutdown request.")
+    show_info_message(
+        title="Не удалось запустить E-IMZO",
+        message=(
+            "Клиент завершил работу, но запустить установленный E-IMZO автоматически не удалось.\n\n"
+            "Проверьте, что E-IMZO установлен в C:\\Program Files (x86)\\E-IMZO, и запустите его вручную."
+        ),
+    )
 
 
 def _show_auto_update_started_message(notification: UpdateNotification) -> None:

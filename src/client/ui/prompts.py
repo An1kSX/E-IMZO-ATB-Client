@@ -10,6 +10,7 @@ from typing import Protocol
 from client.domain.commands import ProxyCommand
 
 LOGGER = logging.getLogger(__name__)
+_USER_ACTION_LOG_EXTRA = {"user_action": True}
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +327,7 @@ def _show_port_conflict_dialog(
                     "Port conflict dialog cancelled by user. process_name=%s port=%s",
                     process_name,
                     port,
+                    extra=_USER_ACTION_LOG_EXTRA,
                 )
             return super().cancel(event)
 
@@ -339,6 +341,7 @@ def _show_port_conflict_dialog(
                 process_name,
                 port,
                 bool(self._remove_from_autostart_var.get()),
+                extra=_USER_ACTION_LOG_EXTRA,
             )
             self.ok()
 

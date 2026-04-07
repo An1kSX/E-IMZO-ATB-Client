@@ -11,6 +11,7 @@ import json
 LOGGER = logging.getLogger(__name__)
 _EIMZO_PROCESS_NAME = "E-IMZO.exe"
 _EIMZO_INSTALL_DIR = r"c:\program files (x86)\e-imzo"
+_EIMZO_EXECUTABLE_PATH = r"C:\Program Files (x86)\E-IMZO\E-IMZO.exe"
 _EIMZO_PROCESS_NAME_ALIASES = {
     _EIMZO_PROCESS_NAME.casefold(),
     "javaw.exe",
@@ -132,6 +133,30 @@ def terminate_related_eimzo_processes(*, listening_process: ListeningProcess) ->
         terminated_any,
     )
     return terminated_any
+
+
+def launch_installed_eimzo() -> bool:
+    executable_path = _EIMZO_EXECUTABLE_PATH
+    if platform.system() != "Windows":
+        LOGGER.warning("Skipping E-IMZO launch because the platform is not Windows.")
+        return False
+
+    if not os.path.isfile(executable_path):
+        LOGGER.error("Could not find installed E-IMZO executable at %s", executable_path)
+        return False
+
+    try:
+        subprocess.Popen(
+            [executable_path],
+            creationflags=_windows_creation_flags(),
+            close_fds=True,
+        )
+    except OSError:
+        LOGGER.exception("Failed to launch installed E-IMZO from %s", executable_path)
+        return False
+
+    LOGGER.info("Launched installed E-IMZO from %s", executable_path)
+    return True
 
 
 def is_eimzo_process_name(name: str) -> bool:

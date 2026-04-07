@@ -16,9 +16,14 @@ class _ApplicationLogFilter(logging.Filter):
         return is_application_log and (record.levelno >= logging.ERROR or is_user_action)
 
 
-class _DetailedApplicationLogFilter(logging.Filter):
+class _ApplicationWarningFileLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        return record.name.startswith("client.")
+        return record.name.startswith("client.") and record.levelno >= logging.WARNING
+
+
+class _UserActionFileLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith("client.") and bool(getattr(record, "user_action", False))
 
 
 def configure_logging(
@@ -64,13 +69,29 @@ def configure_logging(
                 backupCount=_LOG_FILE_BACKUP_COUNT,
                 encoding="utf-8",
             )
+            actions_handler = RotatingFileHandler(
+                candidate_dir / "eimzo-atb-client-actions.log",
+                maxBytes=_LOG_FILE_MAX_BYTES,
+                backupCount=_LOG_FILE_BACKUP_COUNT,
+                encoding="utf-8",
+            )
         except OSError as error:
             _LOGGER.warning("Could not initialize file logging in %s: %s", candidate_dir, error)
             continue
 
-        file_handler.setLevel(logging.INFO)
+        file_handler.setLevel(logging.WARNING)
         file_handler.setFormatter(formatter)
-        file_handler.addFilter(_DetailedApplicationLogFilter())
+        file_handler.addFilter(_ApplicationWarningFileLogFilter())
         root_logger.addHandler(file_handler)
-        _LOGGER.info("Detailed file logging is enabled at %s", candidate_dir / "eimzo-atb-client.log")
+
+        actions_handler.setLevel(logging.INFO)
+        actions_handler.setFormatter(formatter)
+        actions_handler.addFilter(_UserActionFileLogFilter())
+        root_logger.addHandler(actions_handler)
+
+        _LOGGER.info(
+            "Application file logging is enabled at %s and %s",
+            candidate_dir / "eimzo-atb-client.log",
+            candidate_dir / "eimzo-atb-client-actions.log",
+        )
         return

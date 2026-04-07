@@ -44,10 +44,12 @@ _TPM_RETURNCMD = 0x0100
 _IDI_APPLICATION = 32512
 _CONFIGURE_API_URL_MENU_ITEM_ID = 1001
 _RESET_API_URL_MENU_ITEM_ID = 1002
-_EXIT_MENU_ITEM_ID = 1003
+_EXIT_AND_LAUNCH_EIMZO_MENU_ITEM_ID = 1003
+_EXIT_MENU_ITEM_ID = 1004
 _CONFIGURE_API_URL_MENU_TEXT = "Настроить URL E-IMZO API..."
 _RESET_API_URL_MENU_TEXT = "Сбросить сохраненный URL"
 _EXIT_MENU_TEXT = "Выход"
+_EXIT_AND_LAUNCH_EIMZO_MENU_TEXT = "\u0412\u044b\u0445\u043e\u0434 \u0438 \u0437\u0430\u043f\u0443\u0441\u043a E-IMZO"
 _TOOLTIP_TEXT = "E-IMZO ATB Client"
 _WINDOW_CLASS_NAME = "EimzoAtbClientTrayWindow"
 _IMAGE_ICON = 1
@@ -137,11 +139,13 @@ class WindowsTrayIcon:
         self,
         *,
         on_exit_request: Callable[[], None],
+        on_exit_and_launch_eimzo_request: Callable[[], None] | None = None,
         on_configure_api_url_request: Callable[[], None] | None = None,
         on_reset_api_url_request: Callable[[], None] | None = None,
         icon_path: Path | None = None,
     ) -> None:
         self._on_exit_request = on_exit_request
+        self._on_exit_and_launch_eimzo_request = on_exit_and_launch_eimzo_request
         self._on_configure_api_url_request = on_configure_api_url_request
         self._on_reset_api_url_request = on_reset_api_url_request
         self._icon_path = icon_path
@@ -322,6 +326,23 @@ class WindowsTrayIcon:
             reason=reason,
         )
 
+    def _request_shutdown_and_launch_eimzo(self, hwnd: int, *, reason: str) -> None:
+        if self._shutdown_requested:
+            return
+
+        self._shutdown_requested = True
+        LOGGER.info(
+            "Shutdown and E-IMZO launch requested from tray icon: %s",
+            reason,
+            extra=_USER_ACTION_LOG_EXTRA,
+        )
+        if self._on_exit_and_launch_eimzo_request is not None:
+            self._on_exit_and_launch_eimzo_request()
+        else:
+            self._on_exit_request()
+        if hwnd:
+            _user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+
     def _request_reset_api_url(self, *, reason: str) -> None:
         self._invoke_menu_callback(
             self._on_reset_api_url_request,
@@ -361,6 +382,7 @@ class WindowsTrayIcon:
     def _run_context_menu_dialog(self, hwnd: int) -> None:
         try:
             selected_command = _show_tray_menu_dialog(
+                show_exit_and_launch_eimzo=self._on_exit_and_launch_eimzo_request is not None,
                 show_configure_api_url=self._on_configure_api_url_request is not None,
                 show_reset_api_url=self._on_reset_api_url_request is not None,
             )
@@ -377,6 +399,10 @@ class WindowsTrayIcon:
 
         if command_id == _RESET_API_URL_MENU_ITEM_ID:
             self._request_reset_api_url(reason="tray-menu-reset-api-url")
+            return
+
+        if command_id == _EXIT_AND_LAUNCH_EIMZO_MENU_ITEM_ID:
+            self._request_shutdown_and_launch_eimzo(hwnd, reason="tray-menu-exit-and-launch-eimzo")
             return
 
         if command_id == _EXIT_MENU_ITEM_ID:
@@ -455,6 +481,7 @@ def _notification_anchor_point(w_param: int) -> _POINT:
 
 def _show_tray_menu_dialog(
     *,
+    show_exit_and_launch_eimzo: bool,
     show_configure_api_url: bool,
     show_reset_api_url: bool,
 ) -> int | None:
@@ -511,6 +538,15 @@ def _show_tray_menu_dialog(
             container,
             text=_RESET_API_URL_MENU_TEXT,
             command=lambda: choose(_RESET_API_URL_MENU_ITEM_ID),
+            width=30,
+        ).grid(row=row_index, column=0, sticky="ew", pady=(8, 0))
+        row_index += 1
+
+    if show_exit_and_launch_eimzo:
+        ttk.Button(
+            container,
+            text=_EXIT_AND_LAUNCH_EIMZO_MENU_TEXT,
+            command=lambda: choose(_EXIT_AND_LAUNCH_EIMZO_MENU_ITEM_ID),
             width=30,
         ).grid(row=row_index, column=0, sticky="ew", pady=(8, 0))
         row_index += 1
