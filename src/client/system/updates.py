@@ -22,6 +22,8 @@ _DEFAULT_GITHUB_API = "https://api.github.com"
 _DEFAULT_RELEASE_REPO = "An1kSX/E-IMZO-ATB-Client"
 _USER_AGENT = "eimzo-atb-client-updater"
 _FAILED_UPDATE_RETRY_COOLDOWN_SECONDS = 1800.0
+_UPDATER_START_TIMEOUT_SECONDS = 5.0
+_UPDATER_START_POLL_INTERVAL_SECONDS = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,13 +108,23 @@ def maybe_start_self_update_from_github_release_with_notification(
     downloaded_file = updates_dir / f"{config.auto_update_asset_name}.new"
     updater_script = updates_dir / "apply-update.ps1"
     updater_log_file = updates_dir / "apply-update.log"
+    updater_start_marker = updates_dir / "apply-update.started"
     LOGGER.info(
-        "Preparing auto-update files. executable=%s downloaded_file=%s updater_script=%s updater_log=%s",
+        "Preparing auto-update files. executable=%s downloaded_file=%s updater_script=%s updater_log=%s updater_marker=%s",
         current_executable,
         downloaded_file,
         updater_script,
         updater_log_file,
+        updater_start_marker,
     )
+
+    for stale_file in (updater_log_file, updater_start_marker):
+        try:
+            stale_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            LOGGER.warning("Could not remove stale updater file %s: %s", stale_file, error)
 
     if notify_user is not None:
         try:
@@ -137,12 +149,13 @@ def maybe_start_self_update_from_github_release_with_notification(
             target_path=current_executable,
             pid=os.getpid(),
             log_path=updater_log_file,
+            start_marker_path=updater_start_marker,
         )
     except OSError as error:
         LOGGER.error("Could not write updater script %s: %s", updater_script, error)
         return False
 
-    if not _start_updater_script(updater_script):
+    if not _start_updater_script(updater_script, updater_start_marker):
         LOGGER.error("Auto-update aborted because updater script could not be started.")
         return False
 
@@ -328,20 +341,28 @@ def _write_updater_script(
     target_path: Path,
     pid: int,
     log_path: Path,
+    start_marker_path: Path,
 ) -> None:
     source_literal = _to_powershell_literal(str(source_path))
     target_literal = _to_powershell_literal(str(target_path))
     log_literal = _to_powershell_literal(str(log_path))
+    start_marker_literal = _to_powershell_literal(str(start_marker_path))
     script_contents = (
         f"$TargetPid = {pid}\n"
         f"$SourcePath = '{source_literal}'\n"
         f"$TargetPath = '{target_literal}'\n"
         f"$LogPath = '{log_literal}'\n"
+        f"$StartMarkerPath = '{start_marker_literal}'\n"
         "$CopySucceeded = $false\n"
         "\n"
         "function Write-UpdateLog([string]$Message) {\n"
         "    $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'\n"
         "    Add-Content -LiteralPath $LogPath -Value \"$Timestamp [UPDATER] $Message\"\n"
+        "}\n"
+        "\n"
+        "try {\n"
+        "    Set-Content -LiteralPath $StartMarkerPath -Value 'started' -Encoding UTF8\n"
+        "} catch {\n"
         "}\n"
         "\n"
         "Write-UpdateLog \"Updater script started. targetPid=$TargetPid source=$SourcePath target=$TargetPath\"\n"
@@ -397,11 +418,11 @@ def _write_updater_script(
     LOGGER.info("Wrote updater script to %s", script_path)
 
 
-def _start_updater_script(script_path: Path) -> bool:
+def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     LOGGER.info("Starting updater script %s", script_path)
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             [
                 "powershell.exe",
                 "-NoLogo",
@@ -421,8 +442,29 @@ def _start_updater_script(script_path: Path) -> bool:
         LOGGER.error("Could not start updater script %s: %s", script_path, error)
         return False
 
-    LOGGER.info("Updater script process started successfully: %s", script_path)
-    return True
+    deadline = time.monotonic() + _UPDATER_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if start_marker_path.exists():
+            LOGGER.info("Updater script confirmed startup via marker file: %s", start_marker_path)
+            LOGGER.info("Updater script process started successfully: %s", script_path)
+            return True
+
+        if process.poll() is not None:
+            LOGGER.error(
+                "Updater script process exited before creating startup marker. exit_code=%s script=%s",
+                process.returncode,
+                script_path,
+            )
+            return False
+
+        time.sleep(_UPDATER_START_POLL_INTERVAL_SECONDS)
+
+    LOGGER.error(
+        "Updater script did not create startup marker within %.1f seconds: %s",
+        _UPDATER_START_TIMEOUT_SECONDS,
+        start_marker_path,
+    )
+    return False
 
 
 def _to_powershell_literal(value: str) -> str:
