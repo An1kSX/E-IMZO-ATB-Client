@@ -71,6 +71,9 @@ def terminate_process_by_pid(*, pid: int) -> bool:
     if platform.system() != "Windows" or pid <= 0:
         return False
 
+    if _stop_process_via_powershell(pid=pid):
+        return True
+
     completed = subprocess.run(
         ["taskkill", "/PID", str(pid), "/T", "/F"],
         check=False,
@@ -302,3 +305,24 @@ def _normalize_process_name(name: str) -> str:
 
 def _windows_creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _stop_process_via_powershell(*, pid: int) -> bool:
+    command = f"Stop-Process -Id {pid} -Force -ErrorAction Stop"
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        creationflags=_windows_creation_flags(),
+    )
+    if completed.returncode == 0:
+        return True
+
+    LOGGER.warning(
+        "Could not terminate PID %s via Stop-Process. returncode=%s stderr=%s",
+        pid,
+        completed.returncode,
+        (completed.stderr or "").strip(),
+    )
+    return False

@@ -8,7 +8,7 @@ import aiohttp
 from client.bootstrap.config import AppConfig
 from client.integrations.eimzo_api import EimzoApiClient
 from client.system.account import resolve_account_name
-from client.system.autostart import disable_windows_run_entries_by_command_fragments
+from client.system.autostart import disable_known_eimzo_autostart
 from client.system.certificates import maintain_localhost_certificate, resolve_server_certificate
 from client.system.eimzo_process import (
     find_listening_process_by_port,
@@ -143,16 +143,7 @@ async def _resolve_port_conflict(
             return False
 
         if resolution.remove_from_autostart:
-            removed_autostart_entries = disable_windows_run_entries_by_command_fragments(
-                fragments=(
-                    "e-imzo.exe",
-                    "e-imzo.lnk",
-                    "javaw.exe",
-                    "java.exe",
-                    "e-imzo",
-                    r"c:\program files (x86)\e-imzo",
-                ),
-            )
+            removed_autostart_entries = disable_known_eimzo_autostart()
             if removed_autostart_entries == 0:
                 LOGGER.warning("Could not find E-IMZO auto-start entries to remove.")
                 show_info_message(

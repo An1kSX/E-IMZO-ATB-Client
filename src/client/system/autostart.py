@@ -14,6 +14,7 @@ LOGGER = logging.getLogger(__name__)
 
 _RUN_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_VALUE_NAME = "E-IMZO ATB Client"
+_EIMZO_ALL_USERS_STARTUP_LINK = Path(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\E-IMZO.lnk")
 
 
 def sync_windows_auto_start(*, enabled: bool) -> None:
@@ -123,6 +124,21 @@ def disable_windows_run_entries_by_command_fragments(*, fragments: Sequence[str]
     else:
         LOGGER.info("No Windows auto-start entries matched fragments %r.", fragments)
 
+    return removed_count
+
+
+def disable_known_eimzo_autostart() -> int:
+    removed_count = disable_windows_run_entries_by_command_fragments(
+        fragments=(
+            "e-imzo.exe",
+            "e-imzo.lnk",
+            "javaw.exe",
+            "java.exe",
+            "e-imzo",
+            r"c:\program files (x86)\e-imzo",
+        ),
+    )
+    removed_count += _delete_known_eimzo_startup_links()
     return removed_count
 
 
@@ -268,6 +284,22 @@ def _iter_windows_startup_directories() -> list[Path]:
     return directories
 
 
+def _delete_known_eimzo_startup_links() -> int:
+    if platform.system() != "Windows":
+        return 0
+
+    removed_count = 0
+    candidate_paths = {_EIMZO_ALL_USERS_STARTUP_LINK}
+    for startup_dir in _iter_windows_startup_directories():
+        candidate_paths.add(startup_dir / "E-IMZO.lnk")
+
+    for path in candidate_paths:
+        if _delete_path_with_optional_elevation(path):
+            removed_count += 1
+
+    return removed_count
+
+
 def _delete_windows_scheduled_tasks_matching(*, fragments: Sequence[str]) -> int:
     completed = subprocess.run(
         ["schtasks", "/Query", "/V", "/FO", "CSV", "/NH"],
@@ -324,6 +356,48 @@ def _delete_windows_scheduled_tasks_matching(*, fragments: Sequence[str]) -> int
 
 def _windows_creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _delete_path_with_optional_elevation(path: Path) -> bool:
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        LOGGER.warning("Permission denied while removing %s. Requesting elevation.", path)
+        return _delete_path_via_elevated_powershell(path)
+    except OSError:
+        LOGGER.exception("Could not remove %s.", path)
+        return False
+
+
+def _delete_path_via_elevated_powershell(path: Path) -> bool:
+    escaped_path = str(path).replace("'", "''")
+    inner_command = f"Remove-Item -LiteralPath '{escaped_path}' -Force"
+    outer_command = (
+        "Start-Process powershell "
+        "-Verb RunAs "
+        "-Wait "
+        f"-ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','{inner_command}'"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", outer_command],
+        check=False,
+        capture_output=True,
+        text=True,
+        creationflags=_windows_creation_flags(),
+    )
+    if completed.returncode != 0:
+        LOGGER.warning(
+            "Could not launch elevated removal for %s. returncode=%s stderr=%s",
+            path,
+            completed.returncode,
+            (completed.stderr or "").strip(),
+        )
+        return False
+
+    return not path.exists()
 
 
 def _load_winreg():
