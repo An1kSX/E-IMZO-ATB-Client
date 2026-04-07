@@ -419,7 +419,7 @@ def _write_updater_script(
 
 
 def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
-    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     LOGGER.info("Starting updater script %s", script_path)
     try:
         process = subprocess.Popen(
@@ -427,11 +427,8 @@ def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
                 "powershell.exe",
                 "-NoLogo",
                 "-NoProfile",
-                "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-WindowStyle",
-                "Hidden",
                 "-File",
                 str(script_path),
             ],
