@@ -12,7 +12,7 @@ from typing import Any, Callable
 import aiohttp
 
 from client.domain.commands import ProxyCommand
-from client.domain.key_identity_store import KeyIdentityStore
+from client.domain.key_identity_store import KeyIdentity, KeyIdentityStore
 from client.system.certificates import build_client_ssl_context
 from client.ui.prompts import PromptService, TkPromptService
 
@@ -100,6 +100,12 @@ class AccessToken:
         return (now + _ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS) < self.expires_at
 
 
+@dataclass(frozen=True, slots=True)
+class _LoadKeyIdentityPayload:
+    key_alias: str | None
+    key_subject: str | None
+
+
 class EimzoApiClient:
     def __init__(
         self,
@@ -138,7 +144,7 @@ class EimzoApiClient:
 
     async def forward(self, command: ProxyCommand, *, origin: str | None = None) -> ProxyResponse:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
-        key_name = _extract_key_name_from_load_key_command(command)
+        load_key_identity_payload = _extract_identity_payload_from_load_key_command(command)
         prepared_request = self._build_request(command, origin=origin)
         command_label = _format_command_label(plugin=command.plugin, name=command.name)
 
@@ -194,7 +200,11 @@ class EimzoApiClient:
                     access_token=token,
                 )
 
-            self._remember_key_identity(key_name=key_name, response=response.proxy_response, origin=origin)
+            self._remember_key_identity(
+                load_key_identity_payload=load_key_identity_payload,
+                response=response.proxy_response,
+                origin=origin,
+            )
             return response.proxy_response
         except _UpstreamRequestError as error:
             LOGGER.warning("E-IMZO API request failed for %s: %s", command_label, error)
@@ -210,22 +220,47 @@ class EimzoApiClient:
         return "/".join(segment for segment in segments if segment)
 
     def get_identity_by_key_id(self, key_id: str, *, origin: str | None = None) -> str | None:
-        return self._key_identity_store.get(key_id, origin=origin)
+        identity = self._key_identity_store.get_key_identity(key_id, origin=origin)
+        if identity is None:
+            return None
+        return identity.first_available()
 
-    def _remember_key_identity(self, *, key_name: str | None, response: ProxyResponse, origin: str | None) -> None:
-        if key_name is None:
+    def _remember_key_identity(
+        self,
+        *,
+        load_key_identity_payload: _LoadKeyIdentityPayload | None,
+        response: ProxyResponse,
+        origin: str | None,
+    ) -> None:
+        if load_key_identity_payload is None:
             return
 
         key_id = _extract_key_id_from_response(response.body, charset=response.charset)
         if key_id is None:
             return
 
-        identity = self._key_identity_store.remember(key_id=key_id, key_name=key_name, origin=origin)
+        identity = self._key_identity_store.remember(
+            key_id=key_id,
+            key_alias=load_key_identity_payload.key_alias,
+            key_subject=load_key_identity_payload.key_subject,
+            origin=origin,
+        )
         if identity is None:
-            LOGGER.warning("Could not extract INN/PINFL from key name %r for keyId %s", key_name, key_id)
+            LOGGER.warning(
+                "Could not extract INN/PINFL from load_key payload for keyId %s (alias=%r subject=%r)",
+                key_id,
+                load_key_identity_payload.key_alias,
+                load_key_identity_payload.key_subject,
+            )
             return
 
-        LOGGER.info("Stored keyId to INN/PINFL mapping: origin=%s keyId=%s -> %s", origin, key_id, identity)
+        LOGGER.info(
+            "Stored keyId identities: origin=%s keyId=%s inn=%s pinfl=%s",
+            origin,
+            key_id,
+            identity.inn,
+            identity.pinfl,
+        )
 
     def _build_request(self, command: ProxyCommand, *, origin: str | None = None) -> PreparedRequest:
         arguments = command.arguments
@@ -240,7 +275,7 @@ class EimzoApiClient:
             return PreparedRequest(arguments=arguments)
 
         command_label = _format_command_label(plugin=command.plugin, name=command.name)
-        identity = self._key_identity_store.get(key_id, origin=origin)
+        identity = self._key_identity_store.get_key_identity(key_id, origin=origin)
         if identity is None:
             LOGGER.warning("No stored INN/PINFL found for origin=%s keyId=%s during %s", origin, key_id, command_label)
             return PreparedRequest(
@@ -251,12 +286,31 @@ class EimzoApiClient:
                 ),
             )
 
-        request_arguments = list(arguments)
-        if not request_arguments or request_arguments[-1] != identity:
-            request_arguments.append(identity)
-            LOGGER.info("Added INN/PINFL %s to %s arguments for keyId %s", identity, command_label, key_id)
+        identity_values = identity.argument_values()
+        if not identity_values:
+            LOGGER.warning("Stored identity for origin=%s keyId=%s is empty during %s", origin, key_id, command_label)
+            return PreparedRequest(
+                arguments=arguments,
+                error_message=(
+                    "РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РРќРќ/РџРРќР¤Р› РґР»СЏ РІС‹Р±СЂР°РЅРЅРѕРіРѕ РєР»СЋС‡Р°. "
+                    "Р—Р°РіСЂСѓР·РёС‚Рµ РєР»СЋС‡ Р·Р°РЅРѕРІРѕ Рё РїРѕРІС‚РѕСЂРёС‚Рµ РѕРїРµСЂР°С†РёСЋ."
+                ),
+            )
 
-        return PreparedRequest(arguments=request_arguments, sensitive_identity=identity)
+        request_arguments = list(arguments)
+        if not _arguments_end_with_identity_values(arguments=request_arguments, identity_values=identity_values):
+            request_arguments.extend(identity_values)
+            LOGGER.info(
+                "Added identity arguments %s to %s arguments for keyId %s",
+                identity_values,
+                command_label,
+                key_id,
+            )
+
+        return PreparedRequest(
+            arguments=request_arguments,
+            sensitive_identity=_format_identity_for_prompt(identity),
+        )
 
     async def _forward_with_token(
         self,
@@ -438,23 +492,52 @@ def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
     return text
 
 
-def _extract_key_name_from_load_key_command(command: ProxyCommand) -> str | None:
+def _extract_identity_payload_from_load_key_command(command: ProxyCommand) -> _LoadKeyIdentityPayload | None:
     if command.plugin != _PFX_PLUGIN_NAME or command.name != _LOAD_KEY_COMMAND_NAME:
         return None
 
+    key_alias: str | None = None
+    key_subject: str | None = None
     arguments = command.arguments
     if isinstance(arguments, dict):
-        for key in ("key_name", "keyName", "name", "alias"):
-            key_name = arguments.get(key)
-            if isinstance(key_name, str) and key_name.strip():
-                return key_name.strip()
+        key_alias = _extract_first_non_empty_mapping_value(
+            arguments,
+            keys=("key_alias", "keyAlias", "key_name", "keyName", "name", "alias"),
+        )
+        key_subject = _extract_first_non_empty_mapping_value(
+            arguments,
+            keys=("subject", "subjectName", "subject_name", "certificate_subject", "cert_subject", "dn"),
+        )
+        if key_subject is None:
+            key_subject = _build_subject_from_identity_mapping(arguments)
+    elif isinstance(arguments, (list, tuple)):
+        if len(arguments) >= 3 and isinstance(arguments[2], str) and arguments[2].strip():
+            key_alias = arguments[2].strip()
+        if len(arguments) >= 4 and isinstance(arguments[3], str) and arguments[3].strip():
+            key_subject = arguments[3].strip()
 
-    if isinstance(arguments, (list, tuple)) and len(arguments) >= 3:
-        key_name = arguments[2]
-        if isinstance(key_name, str) and key_name.strip():
-            return key_name.strip()
+    if key_alias is None and key_subject is None:
+        return None
+    return _LoadKeyIdentityPayload(key_alias=key_alias, key_subject=key_subject)
 
+
+def _extract_first_non_empty_mapping_value(mapping: dict[str, Any], *, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
+
+
+def _build_subject_from_identity_mapping(mapping: dict[str, Any]) -> str | None:
+    extracted_parts: list[str] = []
+    for key in ("uid", "1.2.860.3.16.1.1", "1.2.860.3.16.1.2"):
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            extracted_parts.append(f"{key}={value.strip()}")
+    if not extracted_parts:
+        return None
+    return ",".join(extracted_parts)
 
 
 def _extract_key_id_from_identity_command(
@@ -477,6 +560,24 @@ def _format_command_label(*, plugin: str | None, name: str) -> str:
     if plugin:
         return f"{plugin}/{name}"
     return name
+
+
+def _arguments_end_with_identity_values(*, arguments: list[Any], identity_values: list[str]) -> bool:
+    if not identity_values:
+        return True
+    if len(arguments) < len(identity_values):
+        return False
+    return arguments[-len(identity_values) :] == identity_values
+
+
+def _format_identity_for_prompt(identity: KeyIdentity) -> str | None:
+    if identity.inn and identity.pinfl:
+        return f"ИНН {identity.inn}, ПИНФЛ {identity.pinfl}"
+    if identity.inn:
+        return f"ИНН {identity.inn}"
+    if identity.pinfl:
+        return f"ПИНФЛ {identity.pinfl}"
+    return None
 
 
 def _extract_key_id_from_response(body: bytes, *, charset: str | None) -> str | None:
