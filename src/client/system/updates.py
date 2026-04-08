@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import ssl
 import subprocess
 import sys
 import time
@@ -16,6 +17,11 @@ import urllib.request
 
 from client import __version__
 from client.bootstrap.config import AppConfig
+
+try:
+    import certifi
+except ImportError:
+    certifi = None
 
 LOGGER = logging.getLogger(__name__)
 _DEFAULT_GITHUB_API = "https://api.github.com"
@@ -225,6 +231,7 @@ def _ensure_directory_writable(*, directory: Path, purpose: str) -> bool:
 def _fetch_latest_release(*, repo: str, asset_name: str, timeout_seconds: float) -> ReleaseInfo | None:
     url = f"{_DEFAULT_GITHUB_API}/repos/{repo}/releases/latest"
     LOGGER.info("Requesting latest GitHub release metadata from %s", url)
+    ssl_context = _build_https_ssl_context()
     request = urllib.request.Request(
         url,
         headers={
@@ -233,7 +240,7 @@ def _fetch_latest_release(*, repo: str, asset_name: str, timeout_seconds: float)
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds, context=ssl_context) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
         LOGGER.warning("Auto-update check failed: %s", error)
@@ -285,12 +292,13 @@ def _parse_version(value: str) -> tuple[int, ...]:
 
 def _download_file(*, url: str, destination: Path, timeout_seconds: float) -> bool:
     LOGGER.info("Downloading auto-update asset from %s to %s", url, destination)
+    ssl_context = _build_https_ssl_context()
     request = urllib.request.Request(
         url,
         headers={"User-Agent": _USER_AGENT},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds, context=ssl_context) as response:
             destination.write_bytes(response.read())
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         LOGGER.warning("Auto-update download failed from %s: %s", url, error)
@@ -489,5 +497,40 @@ def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
         start_marker_path,
     )
     return False
+
+
+def _build_https_ssl_context() -> ssl.SSLContext:
+    certifi_bundle = _resolve_certifi_bundle_path()
+    if certifi_bundle:
+        try:
+            context = ssl.create_default_context(cafile=certifi_bundle)
+            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+            return context
+        except (OSError, ssl.SSLError, ValueError) as error:
+            LOGGER.warning(
+                "Could not initialize TLS context using certifi bundle %s: %s",
+                certifi_bundle,
+                error,
+            )
+
+    return ssl.create_default_context()
+
+
+def _resolve_certifi_bundle_path() -> str | None:
+    if certifi is None:
+        return None
+
+    try:
+        bundle_path = certifi.where()
+    except Exception as error:
+        LOGGER.warning("Could not resolve certifi CA bundle path: %s", error)
+        return None
+
+    if not bundle_path:
+        return None
+
+    return str(bundle_path)
+
+
 def _to_cmd_literal(value: str) -> str:
     return value.replace('"', '""')
