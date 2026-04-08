@@ -185,6 +185,10 @@ async def _run_periodic_auto_update_checks(
         return False
 
     check_interval_seconds = max(1.0, float(getattr(config, "auto_update_check_interval_seconds", 60.0)))
+    logging.getLogger(__name__).info(
+        "Periodic auto-update checks are enabled. check_interval_seconds=%s",
+        check_interval_seconds,
+    )
     while not shutdown_event.is_set():
         try:
             await asyncio.sleep(check_interval_seconds)
