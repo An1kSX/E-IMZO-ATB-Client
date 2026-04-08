@@ -48,6 +48,7 @@ class UpdateState:
 class ReleaseInfo:
     tag_name: str
     download_url: str
+    asset_size_bytes: int | None = None
 
 
 def maybe_start_self_update_from_github_release(*, config: AppConfig) -> bool:
@@ -155,7 +156,12 @@ def maybe_start_self_update_from_github_release_with_notification(
         except Exception:
             LOGGER.exception("Could not show auto-update download notification for release %s.", release.tag_name)
 
-    if not _download_file(url=release.download_url, destination=downloaded_file, timeout_seconds=config.auto_update_check_timeout_seconds):
+    if not _download_file(
+        url=release.download_url,
+        destination=downloaded_file,
+        timeout_seconds=config.auto_update_check_timeout_seconds,
+        expected_size_bytes=release.asset_size_bytes,
+    ):
         LOGGER.warning("Auto-update aborted because the release asset could not be downloaded.")
         return False
 
@@ -251,18 +257,22 @@ def _fetch_latest_release(*, repo: str, asset_name: str, timeout_seconds: float)
         LOGGER.warning("Latest GitHub release response did not contain tag_name.")
         return None
 
-    download_url = _resolve_asset_download_url(payload=payload, asset_name=asset_name)
+    download_url, asset_size_bytes = _resolve_asset_download_metadata(payload=payload, asset_name=asset_name)
     if not download_url:
         LOGGER.warning("No release asset %r found in latest release %s.", asset_name, tag_name)
         return None
 
-    return ReleaseInfo(tag_name=tag_name, download_url=download_url)
+    return ReleaseInfo(
+        tag_name=tag_name,
+        download_url=download_url,
+        asset_size_bytes=asset_size_bytes,
+    )
 
 
-def _resolve_asset_download_url(*, payload: dict, asset_name: str) -> str | None:
+def _resolve_asset_download_metadata(*, payload: dict, asset_name: str) -> tuple[str | None, int | None]:
     assets = payload.get("assets")
     if not isinstance(assets, list):
-        return None
+        return (None, None)
 
     normalized_name = asset_name.casefold()
     for asset in assets:
@@ -273,9 +283,12 @@ def _resolve_asset_download_url(*, payload: dict, asset_name: str) -> str | None
             continue
         url = str(asset.get("browser_download_url") or "").strip()
         if url:
-            return url
+            size = asset.get("size")
+            if isinstance(size, int) and size > 0:
+                return (url, size)
+            return (url, None)
 
-    return None
+    return (None, None)
 
 
 def _is_newer_version(*, candidate: str, current: str) -> bool:
@@ -290,7 +303,13 @@ def _parse_version(value: str) -> tuple[int, ...]:
     return tuple(numbers)
 
 
-def _download_file(*, url: str, destination: Path, timeout_seconds: float) -> bool:
+def _download_file(
+    *,
+    url: str,
+    destination: Path,
+    timeout_seconds: float,
+    expected_size_bytes: int | None = None,
+) -> bool:
     LOGGER.info("Downloading auto-update asset from %s to %s", url, destination)
     ssl_context = _build_https_ssl_context()
     request = urllib.request.Request(
@@ -299,9 +318,31 @@ def _download_file(*, url: str, destination: Path, timeout_seconds: float) -> bo
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds, context=ssl_context) as response:
-            destination.write_bytes(response.read())
+            payload = response.read()
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         LOGGER.warning("Auto-update download failed from %s: %s", url, error)
+        return False
+
+    if expected_size_bytes is not None and len(payload) != expected_size_bytes:
+        LOGGER.warning(
+            "Auto-update download size mismatch for %s: expected=%s actual=%s",
+            url,
+            expected_size_bytes,
+            len(payload),
+        )
+        return False
+
+    if not _looks_like_windows_executable(payload):
+        LOGGER.warning(
+            "Auto-update download does not look like a Windows executable (missing MZ header): %s",
+            url,
+        )
+        return False
+
+    try:
+        destination.write_bytes(payload)
+    except OSError as error:
+        LOGGER.warning("Auto-update download failed while writing %s: %s", destination, error)
         return False
 
     try:
@@ -310,6 +351,10 @@ def _download_file(*, url: str, destination: Path, timeout_seconds: float) -> bo
         file_size = -1
     LOGGER.info("Downloaded auto-update asset successfully. destination=%s size_bytes=%s", destination, file_size)
     return True
+
+
+def _looks_like_windows_executable(payload: bytes) -> bool:
+    return len(payload) >= 2 and payload[:2] == b"MZ"
 
 
 def _build_update_state_path(runtime_dir: Path) -> Path:
