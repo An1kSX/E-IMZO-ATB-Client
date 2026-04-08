@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,12 @@ _USER_AGENT = "eimzo-atb-client-updater"
 _FAILED_UPDATE_RETRY_COOLDOWN_SECONDS = 1800.0
 _UPDATER_START_TIMEOUT_SECONDS = 5.0
 _UPDATER_START_POLL_INTERVAL_SECONDS = 0.1
+_PYINSTALLER_ENV_VARS_TO_CLEAR = (
+    "_MEIPASS2",
+    "_PYI_APPLICATION_HOME_DIR",
+    "_PYI_PARENT_PROCESS_LEVEL",
+    "_PYI_SPLASH_IPC",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +56,7 @@ class ReleaseInfo:
     tag_name: str
     download_url: str
     asset_size_bytes: int | None = None
+    asset_sha256: str | None = None
 
 
 def maybe_start_self_update_from_github_release(*, config: AppConfig) -> bool:
@@ -161,6 +169,7 @@ def maybe_start_self_update_from_github_release_with_notification(
         destination=downloaded_file,
         timeout_seconds=config.auto_update_check_timeout_seconds,
         expected_size_bytes=release.asset_size_bytes,
+        expected_sha256=release.asset_sha256,
     ):
         LOGGER.warning("Auto-update aborted because the release asset could not be downloaded.")
         return False
@@ -257,7 +266,10 @@ def _fetch_latest_release(*, repo: str, asset_name: str, timeout_seconds: float)
         LOGGER.warning("Latest GitHub release response did not contain tag_name.")
         return None
 
-    download_url, asset_size_bytes = _resolve_asset_download_metadata(payload=payload, asset_name=asset_name)
+    download_url, asset_size_bytes, asset_sha256 = _resolve_asset_download_metadata(
+        payload=payload,
+        asset_name=asset_name,
+    )
     if not download_url:
         LOGGER.warning("No release asset %r found in latest release %s.", asset_name, tag_name)
         return None
@@ -266,13 +278,18 @@ def _fetch_latest_release(*, repo: str, asset_name: str, timeout_seconds: float)
         tag_name=tag_name,
         download_url=download_url,
         asset_size_bytes=asset_size_bytes,
+        asset_sha256=asset_sha256,
     )
 
 
-def _resolve_asset_download_metadata(*, payload: dict, asset_name: str) -> tuple[str | None, int | None]:
+def _resolve_asset_download_metadata(
+    *,
+    payload: dict,
+    asset_name: str,
+) -> tuple[str | None, int | None, str | None]:
     assets = payload.get("assets")
     if not isinstance(assets, list):
-        return (None, None)
+        return (None, None, None)
 
     normalized_name = asset_name.casefold()
     for asset in assets:
@@ -284,11 +301,33 @@ def _resolve_asset_download_metadata(*, payload: dict, asset_name: str) -> tuple
         url = str(asset.get("browser_download_url") or "").strip()
         if url:
             size = asset.get("size")
+            digest_value = _extract_sha256_from_release_asset(asset)
             if isinstance(size, int) and size > 0:
-                return (url, size)
-            return (url, None)
+                return (url, size, digest_value)
+            return (url, None, digest_value)
 
-    return (None, None)
+    return (None, None, None)
+
+
+def _extract_sha256_from_release_asset(asset: dict[str, object]) -> str | None:
+    digest_value = asset.get("digest")
+    if isinstance(digest_value, str):
+        normalized_digest = digest_value.strip()
+        if normalized_digest.lower().startswith("sha256:"):
+            candidate = normalized_digest.split(":", 1)[1]
+            if _is_valid_sha256_hex(candidate):
+                return candidate.lower()
+
+    sha_value = asset.get("sha256")
+    if isinstance(sha_value, str) and _is_valid_sha256_hex(sha_value):
+        return sha_value.strip().lower()
+
+    return None
+
+
+def _is_valid_sha256_hex(value: str) -> bool:
+    candidate = value.strip()
+    return len(candidate) == 64 and all(ch in "0123456789abcdefABCDEF" for ch in candidate)
 
 
 def _is_newer_version(*, candidate: str, current: str) -> bool:
@@ -309,6 +348,7 @@ def _download_file(
     destination: Path,
     timeout_seconds: float,
     expected_size_bytes: int | None = None,
+    expected_sha256: str | None = None,
 ) -> bool:
     LOGGER.info("Downloading auto-update asset from %s to %s", url, destination)
     ssl_context = _build_https_ssl_context()
@@ -331,6 +371,17 @@ def _download_file(
             len(payload),
         )
         return False
+
+    if expected_sha256 is not None:
+        actual_sha256 = hashlib.sha256(payload).hexdigest()
+        if actual_sha256.lower() != expected_sha256.lower():
+            LOGGER.warning(
+                "Auto-update download checksum mismatch for %s: expected_sha256=%s actual_sha256=%s",
+                url,
+                expected_sha256,
+                actual_sha256,
+            )
+            return False
 
     if not _looks_like_windows_executable(payload):
         LOGGER.warning(
@@ -472,6 +523,12 @@ def _write_updater_script(
         ")\n"
         "\n"
         ":AfterCopy\n"
+        "set \"_MEIPASS2=\"\n"
+        "set \"_PYI_APPLICATION_HOME_DIR=\"\n"
+        "set \"_PYI_PARENT_PROCESS_LEVEL=\"\n"
+        "set \"_PYI_SPLASH_IPC=\"\n"
+        "set \"PYINSTALLER_RESET_ENVIRONMENT=1\"\n"
+        "call :WriteUpdateLog Cleared PyInstaller bootstrap environment variables before launching the updated executable.\n"
         "start \"\" \"%TargetPath%\" >NUL 2>&1\n"
         "if errorlevel 1 (\n"
         "    call :WriteUpdateLog Failed to start updated executable. error=%errorlevel%\n"
@@ -514,6 +571,7 @@ def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
             ],
             creationflags=creation_flags,
             close_fds=True,
+            env=_build_updater_subprocess_env(),
         )
     except OSError as error:
         LOGGER.error("Could not start updater script %s: %s", script_path, error)
@@ -542,6 +600,14 @@ def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
         start_marker_path,
     )
     return False
+
+
+def _build_updater_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for variable in _PYINSTALLER_ENV_VARS_TO_CLEAR:
+        env.pop(variable, None)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
 
 
 def _build_https_ssl_context() -> ssl.SSLContext:

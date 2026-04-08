@@ -30,23 +30,10 @@ $pyInstallerArgs = @(
   "-m", "PyInstaller",
   "--noconfirm",
   "--clean",
-  "--onefile",
-  "--windowed",
-  "--name", "eimzo-atb-client",
-  "--paths", "src",
-  "--collect-all", "aiohttp",
-  "--collect-all", "websockets",
-  "--collect-all", "cryptography",
-  "--collect-all", "winloop",
+  "--noupx",
   "--workpath", "build/pyinstaller",
-  "--distpath", "dist"
+  "--distpath", "dist",
+  "eimzo-atb-client.spec"
 )
-
-$iconPath = Join-Path $projectRoot "icon.ico"
-if (Test-Path $iconPath) {
-  $pyInstallerArgs += @("--icon", $iconPath)
-}
-
-$pyInstallerArgs += "src/client/__main__.py"
 
 python @pyInstallerArgs
