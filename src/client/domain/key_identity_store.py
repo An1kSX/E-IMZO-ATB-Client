@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
+import re
 from typing import TypeAlias
 
 INN_LENGTH = 9
@@ -9,6 +10,7 @@ PINFL_LENGTH = 14
 PINFL_KEY_NAME_LENGTH = 20
 MAX_STORED_KEY_IDS = 1000
 _KeyScope: TypeAlias = tuple[str | None, str]
+_LEADING_DIGITS_PATTERN = re.compile(r"^(\d+)")
 
 
 class KeyIdentityStore:
@@ -52,10 +54,13 @@ def extract_identity_from_key_name(key_name: str) -> str | None:
 
     upper_name = normalized_name.upper()
     if upper_name.startswith("DS"):
-        normalized_name = normalized_name[2:]
+        normalized_name = normalized_name[2:].strip()
 
-    if not normalized_name.isdigit():
+    leading_digits_match = _LEADING_DIGITS_PATTERN.match(normalized_name)
+    if leading_digits_match is None:
         return None
+
+    normalized_name = leading_digits_match.group(1)
 
     if len(normalized_name) < INN_LENGTH:
         return None
