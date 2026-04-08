@@ -187,7 +187,14 @@ def maybe_start_self_update_from_github_release_with_notification(
         LOGGER.error("Could not write updater script %s: %s", updater_script, error)
         return False
 
-    if not _start_updater_script(updater_script, updater_start_marker):
+    if not _start_updater_script(
+        updater_script,
+        updater_start_marker,
+        target_pid=os.getpid(),
+        source_path=downloaded_file,
+        target_path=current_executable,
+        log_path=updater_log_file,
+    ):
         LOGGER.error("Auto-update aborted because updater script could not be started.")
         return False
 
@@ -483,18 +490,14 @@ def _write_updater_script(
     log_path: Path,
     start_marker_path: Path,
 ) -> None:
-    source_literal = _to_cmd_literal(str(source_path))
-    target_literal = _to_cmd_literal(str(target_path))
-    log_literal = _to_cmd_literal(str(log_path))
-    start_marker_literal = _to_cmd_literal(str(start_marker_path))
     script_contents = (
         "@echo off\n"
         "setlocal EnableExtensions EnableDelayedExpansion\n"
-        f"set \"TargetPid={pid}\"\n"
-        f"set \"SourcePath={source_literal}\"\n"
-        f"set \"TargetPath={target_literal}\"\n"
-        f"set \"LogPath={log_literal}\"\n"
-        f"set \"StartMarkerPath={start_marker_literal}\"\n"
+        "set \"TargetPid=%~1\"\n"
+        "set \"SourcePath=%~2\"\n"
+        "set \"TargetPath=%~3\"\n"
+        "set \"LogPath=%~4\"\n"
+        "set \"StartMarkerPath=%~5\"\n"
         "set \"CopySucceeded=0\"\n"
         "\n"
         "> \"%StartMarkerPath%\" echo started\n"
@@ -556,10 +559,26 @@ def _write_updater_script(
         "exit /b 0\n"
     )
     script_path.write_text(script_contents, encoding="utf-8")
-    LOGGER.info("Wrote updater script to %s", script_path)
+    LOGGER.info(
+        "Wrote updater script to %s. targetPid=%s source=%s target=%s log=%s marker=%s",
+        script_path,
+        pid,
+        source_path,
+        target_path,
+        log_path,
+        start_marker_path,
+    )
 
 
-def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
+def _start_updater_script(
+    script_path: Path,
+    start_marker_path: Path,
+    *,
+    target_pid: int,
+    source_path: Path,
+    target_path: Path,
+    log_path: Path,
+) -> bool:
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     LOGGER.info("Starting updater script %s", script_path)
     try:
@@ -568,6 +587,11 @@ def _start_updater_script(script_path: Path, start_marker_path: Path) -> bool:
                 "cmd.exe",
                 "/c",
                 str(script_path),
+                str(target_pid),
+                str(source_path),
+                str(target_path),
+                str(log_path),
+                str(start_marker_path),
             ],
             creationflags=creation_flags,
             close_fds=True,
@@ -641,7 +665,3 @@ def _resolve_certifi_bundle_path() -> str | None:
         return None
 
     return str(bundle_path)
-
-
-def _to_cmd_literal(value: str) -> str:
-    return value.replace('"', '""')
