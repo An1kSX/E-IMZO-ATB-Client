@@ -30,7 +30,6 @@ $pyInstallerArgs = @(
   "-m", "PyInstaller",
   "--noconfirm",
   "--clean",
-  "--noupx",
   "--workpath", "build/pyinstaller",
   "--distpath", "dist",
   "eimzo-atb-client.spec"
