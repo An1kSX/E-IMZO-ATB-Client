@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import logging
+import os
 import platform
 from pathlib import Path
 import sys
 import threading
+from typing import TYPE_CHECKING
 
 from client import __version__
-from client.app import run_app
 from client.bootstrap.config import (
     AppConfig,
     ConfigurationError,
@@ -17,6 +17,10 @@ from client.bootstrap.config import (
     prompt_and_save_api_eimzo_url,
 )
 from client.bootstrap.logging import configure_logging
+from client.bootstrap.ssl_hardening import (
+    install_ssl_cert_store_fallback,
+    is_windows_certificate_store_ssl_error,
+)
 from client.system.app_icon import resolve_app_icon_path
 from client.system.autostart import sync_windows_auto_start
 from client.system.eimzo_process import launch_installed_eimzo
@@ -28,10 +32,28 @@ from client.system.updates import (
 )
 from client.ui import show_info_message
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
 _TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
+def _load_run_app() -> "Callable[[AppConfig], Awaitable[None]]":
+    from client.app import run_app as imported_run_app
+
+    return imported_run_app
+
+
+async def _run_app_entrypoint(config: AppConfig) -> None:
+    imported_run_app = _load_run_app()
+    await imported_run_app(config)
+
+
+run_app: "Callable[[AppConfig], Awaitable[None]]" = _run_app_entrypoint
+
+
 def main() -> None:
+    install_ssl_cert_store_fallback()
     _install_windows_event_loop()
 
     try:
@@ -76,7 +98,9 @@ def main() -> None:
             asyncio.run(_run_with_system_tray(config))
         except KeyboardInterrupt:
             logging.getLogger(__name__).info("Local WSS service stopped by user.")
-        except Exception:
+        except Exception as error:
+            if _handle_windows_certificate_store_failure(error):
+                raise SystemExit(2) from error
             logging.getLogger(__name__).exception("Local WSS service stopped because of an unexpected error.")
             raise SystemExit(1)
     finally:
@@ -208,6 +232,30 @@ async def _run_periodic_auto_update_checks(
             return True
 
     return False
+
+
+def _handle_windows_certificate_store_failure(error: BaseException) -> bool:
+    if not is_windows_certificate_store_ssl_error(error):
+        return False
+
+    logging.getLogger(__name__).error(
+        "Detected a Windows certificate-store failure while initializing TLS.",
+        exc_info=error,
+    )
+    try:
+        show_info_message(
+            title="Windows certificate store error",
+            message=(
+                "The current Windows user certificate store contains invalid or corrupted certificates.\n\n"
+                "Please contact your IT administrator to repair the Current User certificate store "
+                "or recreate the Windows profile. The app cannot continue with this TLS error."
+            ),
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Could not show Windows certificate-store failure message box."
+        )
+    return True
 
 
 def _install_windows_event_loop() -> None:

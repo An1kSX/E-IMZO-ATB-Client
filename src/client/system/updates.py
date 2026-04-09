@@ -18,6 +18,10 @@ import urllib.request
 
 from client import __version__
 from client.bootstrap.config import AppConfig
+from client.bootstrap.ssl_hardening import (
+    create_default_context_with_windows_store_fallback,
+    load_default_certs_safely,
+)
 
 try:
     import certifi
@@ -638,8 +642,8 @@ def _build_https_ssl_context() -> ssl.SSLContext:
     certifi_bundle = _resolve_certifi_bundle_path()
     if certifi_bundle:
         try:
-            context = ssl.create_default_context(cafile=certifi_bundle)
-            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+            context = create_default_context_with_windows_store_fallback(cafile=certifi_bundle)
+            load_default_certs_safely(context, ssl.Purpose.SERVER_AUTH)
             return context
         except (OSError, ssl.SSLError, ValueError) as error:
             LOGGER.warning(
@@ -648,7 +652,7 @@ def _build_https_ssl_context() -> ssl.SSLContext:
                 error,
             )
 
-    return ssl.create_default_context()
+    return create_default_context_with_windows_store_fallback()
 
 
 def _resolve_certifi_bundle_path() -> str | None:
