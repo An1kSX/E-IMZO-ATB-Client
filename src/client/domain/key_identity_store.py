@@ -70,7 +70,18 @@ class KeyIdentityStore:
         return identity.first_available()
 
     def get_key_identity(self, key_id: str, *, origin: str | None = None) -> KeyIdentity | None:
-        return self._identities_by_scoped_key_id.get((origin, key_id))
+        identity = self._identities_by_scoped_key_id.get((origin, key_id))
+        if identity is not None:
+            return identity
+
+        for (stored_origin, stored_key_id), stored_identity in reversed(self._identities_by_scoped_key_id.items()):
+            if stored_key_id != key_id:
+                continue
+            if stored_origin == origin:
+                continue
+            return stored_identity
+
+        return None
 
     def _trim_to_capacity(self) -> None:
         while len(self._identities_by_scoped_key_id) > self._max_entries:
