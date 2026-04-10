@@ -156,8 +156,12 @@ def _extract_key_identity_from_key_alias(key_alias: str | None) -> KeyIdentity |
         return None
 
     digits = leading_digits_match.group(1)
+    # If alias contains a PINFL-length prefix, treat it as PINFL-only.
+    # Do not derive INN from the same digits to avoid sending synthetic INN values.
     pinfl = _normalize_identity_value(digits, expected_length=PINFL_LENGTH)
-    inn = _normalize_identity_value(digits, expected_length=INN_LENGTH)
+    inn: str | None = None
+    if pinfl is None:
+        inn = _normalize_identity_value(digits, expected_length=INN_LENGTH)
 
     identity = KeyIdentity(inn=inn, pinfl=pinfl)
     if identity.has_any():
