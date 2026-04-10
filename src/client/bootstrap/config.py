@@ -44,7 +44,7 @@ class AppConfig:
     auto_update_enabled: bool = True
     auto_update_asset_name: str = "eimzo-atb-client.exe"
     auto_update_check_timeout_seconds: float = 5.0
-    auto_update_check_interval_seconds: float = 60.0
+    auto_update_check_interval_seconds: float = 600.0
 
     @classmethod
     def from_env(
@@ -90,7 +90,7 @@ class AppConfig:
             auto_update_enabled=_read_bool("AUTO_UPDATE_ENABLED", default=True),
             auto_update_asset_name=os.getenv("AUTO_UPDATE_ASSET_NAME", "eimzo-atb-client.exe"),
             auto_update_check_timeout_seconds=_read_float("AUTO_UPDATE_CHECK_TIMEOUT_SECONDS", default=5.0),
-            auto_update_check_interval_seconds=_read_float("AUTO_UPDATE_CHECK_INTERVAL_SECONDS", default=60.0),
+            auto_update_check_interval_seconds=_read_float("AUTO_UPDATE_CHECK_INTERVAL_SECONDS", default=600.0),
         )
         config._validate()
         return config
