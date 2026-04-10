@@ -32,12 +32,18 @@ _AUTH_PLUGIN_NAME = "auth"
 _AUTH_LOGIN_COMMAND_NAME = "login"
 _AUTH_INVALID_STATUS_CODES = {400, 401, 403}
 _ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 30.0
+_SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS = 3.0
 _MISSING = object()
 _IDENTITY_ARGUMENT_KEY_ID_INDEXES: dict[tuple[str | None, str], int] = {
     (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME): 1,
     (_PFX_PLUGIN_NAME, _VERIFY_PASSWORD_COMMAND_NAME): 0,
     (_PFX_PLUGIN_NAME, _CHANGE_PASSWORD_COMMAND_NAME): 0,
 }
+_SENSITIVE_CONFIRMATION_COOLDOWN_COMMANDS: set[tuple[str | None, str]] = {
+    (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME),
+    (_PFX_PLUGIN_NAME, _VERIFY_PASSWORD_COMMAND_NAME),
+}
+_SENSITIVE_CONFIRMATION_COOLDOWN_GROUP_PASSWORD_AUTOFILL = "password_autofill"
 LOGGER = logging.getLogger(__name__)
 _USER_ACTION_LOG_EXTRA = {"user_action": True}
 
@@ -131,6 +137,8 @@ class EimzoApiClient:
         self._clock = clock or time.time
         self._access_token: AccessToken | None = None
         self._auth_lock = asyncio.Lock()
+        self._sensitive_confirmation_cooldown_until_by_key: dict[tuple[str | None, str, str], float] = {}
+        self._sensitive_confirmation_locks_by_key: dict[tuple[str | None, str, str], asyncio.Lock] = {}
 
     async def ensure_authenticated(self) -> bool:
         try:
@@ -156,10 +164,37 @@ class EimzoApiClient:
             return _failed_proxy_response(prepared_request.error_message)
 
         if prepared_request.sensitive_identity is not None:
-            approved = await self._prompt_service.confirm_sensitive_operation(
+            cooldown_key = self._build_sensitive_confirmation_cooldown_key(
                 command=command,
+                origin=origin,
                 identity=prepared_request.sensitive_identity,
             )
+
+            if cooldown_key is not None:
+                confirmation_lock = self._sensitive_confirmation_locks_by_key.setdefault(cooldown_key, asyncio.Lock())
+                async with confirmation_lock:
+                    if self._is_sensitive_confirmation_cooldown_active(cooldown_key):
+                        LOGGER.info(
+                            "Skipped confirmation for %s due cooldown. origin=%s identity=%s",
+                            command_label,
+                            origin,
+                            prepared_request.sensitive_identity,
+                            extra=_USER_ACTION_LOG_EXTRA,
+                        )
+                        approved = True
+                    else:
+                        approved = await self._prompt_service.confirm_sensitive_operation(
+                            command=command,
+                            identity=prepared_request.sensitive_identity,
+                        )
+                        if approved:
+                            self._remember_sensitive_confirmation(cooldown_key)
+            else:
+                approved = await self._prompt_service.confirm_sensitive_operation(
+                    command=command,
+                    identity=prepared_request.sensitive_identity,
+                )
+
             if not approved:
                 LOGGER.info(
                     "User cancelled sensitive operation %s for identity %s",
@@ -459,6 +494,32 @@ class EimzoApiClient:
                 )
             ) from error
 
+    def _build_sensitive_confirmation_cooldown_key(
+        self,
+        *,
+        command: ProxyCommand,
+        origin: str | None,
+        identity: str,
+    ) -> tuple[str | None, str, str] | None:
+        if (command.plugin, command.name) not in _SENSITIVE_CONFIRMATION_COOLDOWN_COMMANDS:
+            return None
+        return (
+            _normalize_origin(origin),
+            identity,
+            _SENSITIVE_CONFIRMATION_COOLDOWN_GROUP_PASSWORD_AUTOFILL,
+        )
+
+    def _is_sensitive_confirmation_cooldown_active(self, cooldown_key: tuple[str | None, str, str]) -> bool:
+        expires_at = self._sensitive_confirmation_cooldown_until_by_key.get(cooldown_key)
+        if expires_at is None:
+            return False
+        return expires_at > self._clock()
+
+    def _remember_sensitive_confirmation(self, cooldown_key: tuple[str | None, str, str]) -> None:
+        self._sensitive_confirmation_cooldown_until_by_key[cooldown_key] = (
+            self._clock() + _SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS
+        )
+
 
 def _cancelled_proxy_response() -> ProxyResponse:
     return ProxyResponse.from_json({"success": False})
@@ -560,6 +621,16 @@ def _format_command_label(*, plugin: str | None, name: str) -> str:
     if plugin:
         return f"{plugin}/{name}"
     return name
+
+
+def _normalize_origin(origin: str | None) -> str | None:
+    if origin is None:
+        return None
+
+    normalized_origin = origin.strip().casefold()
+    if not normalized_origin:
+        return None
+    return normalized_origin
 
 
 def _arguments_end_with_identity_values(*, arguments: list[Any], identity_values: list[str]) -> bool:

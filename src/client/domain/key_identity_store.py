@@ -23,14 +23,14 @@ class KeyIdentity:
 
     def argument_values(self) -> list[str]:
         values: list[str] = []
-        if self.inn:
-            values.append(self.inn)
         if self.pinfl:
             values.append(self.pinfl)
+        if self.inn:
+            values.append(self.inn)
         return values
 
     def first_available(self) -> str | None:
-        return self.inn or self.pinfl
+        return self.pinfl or self.inn
 
     def has_any(self) -> bool:
         return self.inn is not None or self.pinfl is not None
