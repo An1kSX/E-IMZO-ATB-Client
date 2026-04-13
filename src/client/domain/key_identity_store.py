@@ -20,9 +20,17 @@ _UID_ATTRIBUTE = "uid"
 class KeyIdentity:
     inn: str | None = None
     pinfl: str | None = None
+    prefer_inn_first: bool = False
 
     def argument_values(self) -> list[str]:
         values: list[str] = []
+        if self.prefer_inn_first:
+            if self.inn:
+                values.append(self.inn)
+            if self.pinfl:
+                values.append(self.pinfl)
+            return values
+
         if self.pinfl:
             values.append(self.pinfl)
         if self.inn:
@@ -30,6 +38,8 @@ class KeyIdentity:
         return values
 
     def first_available(self) -> str | None:
+        if self.prefer_inn_first:
+            return self.inn or self.pinfl
         return self.pinfl or self.inn
 
     def has_any(self) -> bool:
@@ -91,6 +101,7 @@ class KeyIdentityStore:
 def extract_key_identity(*, key_alias: str | None, key_subject: str | None) -> KeyIdentity | None:
     subject_identity = _extract_key_identity_from_subject(key_subject)
     alias_identity = _extract_key_identity_from_key_alias(key_alias)
+    prefer_inn_first = _alias_prefers_inn_first(key_alias)
 
     inn = subject_identity.inn if subject_identity and subject_identity.inn else None
     pinfl = subject_identity.pinfl if subject_identity and subject_identity.pinfl else None
@@ -99,7 +110,7 @@ def extract_key_identity(*, key_alias: str | None, key_subject: str | None) -> K
     if pinfl is None and alias_identity is not None:
         pinfl = alias_identity.pinfl
 
-    identity = KeyIdentity(inn=inn, pinfl=pinfl)
+    identity = KeyIdentity(inn=inn, pinfl=pinfl, prefer_inn_first=prefer_inn_first)
     if identity.has_any():
         return identity
     return None
@@ -167,6 +178,21 @@ def _extract_key_identity_from_key_alias(key_alias: str | None) -> KeyIdentity |
     if identity.has_any():
         return identity
     return None
+
+
+def _alias_prefers_inn_first(key_alias: str | None) -> bool:
+    if not isinstance(key_alias, str) or not key_alias.strip():
+        return False
+
+    normalized_alias = Path(key_alias).stem.strip()
+    if not normalized_alias:
+        return False
+
+    if normalized_alias.upper().startswith("DS"):
+        normalized_alias = normalized_alias[2:].strip()
+
+    normalized_alias_casefolded = normalized_alias.casefold()
+    return "o" in normalized_alias_casefolded
 
 
 def _normalize_identity_value(value: str | None, *, expected_length: int) -> str | None:
