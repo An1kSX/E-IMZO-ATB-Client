@@ -198,18 +198,31 @@ def _resolve_windows_pid_by_port(*, port: int) -> int | None:
 
 def _extract_pid_from_netstat_line(*, line: str, port: int) -> int | None:
     chunks = line.split()
-    if len(chunks) < 4:
+    if len(chunks) < 5:
+        return None
+
+    if chunks[0].upper() != "TCP":
         return None
 
     local_address = chunks[1]
     if not local_address.endswith(f":{port}"):
         return None
 
+    # Treat only listener-like rows where the remote endpoint is wildcard `:0`.
+    # This prevents matching TIME_WAIT/ESTABLISHED rows for the same local port.
+    foreign_address = chunks[2]
+    if not foreign_address.endswith(":0"):
+        return None
+
     pid_token = chunks[-1]
     if not pid_token.isdigit():
         return None
 
-    return int(pid_token)
+    pid = int(pid_token)
+    if pid <= 0:
+        return None
+
+    return pid
 
 
 def _resolve_windows_process_name(*, pid: int) -> str | None:
