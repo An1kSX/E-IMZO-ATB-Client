@@ -23,6 +23,8 @@ _REQUEST_COMPLETED_CLOSE_REASON = "Request completed"
 _SERVER_RELOAD_CLOSE_REASON = "Server certificate reloaded"
 _UNEXPECTED_PATH_CLOSE_REASON = "Unexpected WebSocket path"
 _LEGACY_SERVER_CLOSE_REASON = "Server closed"
+_SUPPORTED_WEBSOCKET_VERSION = "13"
+_LEGACY_WEBSOCKET_VERSIONS = frozenset({"7", "8"})
 
 
 class WebSocketPortInUseError(RuntimeError):
@@ -143,6 +145,8 @@ class WebSocketProxyServer:
                     host=self._config.ws_host,
                     port=port,
                     ssl=ssl_context,
+                    compression=None,
+                    process_request=self._process_opening_handshake_request,
                     ping_interval=self._config.ws_ping_interval_seconds,
                     ping_timeout=self._config.ws_ping_timeout_seconds,
                 )
@@ -170,6 +174,59 @@ class WebSocketProxyServer:
                 reason,
                 _LEGACY_SERVER_CLOSE_REASON,
             )
+
+    async def _process_opening_handshake_request(self, path: str, request_headers: Any) -> Any:
+        origin = _normalize_singleton_header(request_headers, "Origin")
+        websocket_key = _normalize_singleton_header(request_headers, "Sec-WebSocket-Key")
+        requested_version = _normalize_singleton_header(request_headers, "Sec-WebSocket-Version")
+        host = _safe_get_header(request_headers, "Host")
+        connection = _safe_get_header(request_headers, "Connection")
+        upgrade = _safe_get_header(request_headers, "Upgrade")
+        has_websocket_key = websocket_key is not None
+
+        if requested_version in _LEGACY_WEBSOCKET_VERSIONS:
+            _replace_header(
+                request_headers,
+                "Sec-WebSocket-Version",
+                _SUPPORTED_WEBSOCKET_VERSION,
+            )
+            LOGGER.warning(
+                "Normalized legacy WebSocket version header from %s to %s. "
+                "path=%s host=%s origin=%s connection=%s upgrade=%s has_sec_websocket_key=%s",
+                requested_version,
+                _SUPPORTED_WEBSOCKET_VERSION,
+                path,
+                host,
+                origin,
+                connection,
+                upgrade,
+                has_websocket_key,
+            )
+
+        missing_headers = []
+        for header_name in (
+            "Connection",
+            "Upgrade",
+            "Sec-WebSocket-Key",
+            "Sec-WebSocket-Version",
+        ):
+            if _safe_get_header(request_headers, header_name) is None:
+                missing_headers.append(header_name)
+
+        if missing_headers:
+            LOGGER.warning(
+                "Potentially invalid WebSocket opening handshake received. "
+                "missing_headers=%s path=%s host=%s origin=%s connection=%s upgrade=%s version=%s",
+                ",".join(missing_headers),
+                path,
+                host,
+                origin,
+                connection,
+                upgrade,
+                _safe_get_header(request_headers, "Sec-WebSocket-Version"),
+            )
+
+        return None
 
     def _resolve_insecure_port(self) -> int | None:
         raw_value = getattr(self._config, "ws_insecure_port", None)
@@ -318,6 +375,54 @@ class WebSocketProxyServer:
             return ":".join(str(part) for part in remote_address if part is not None)
 
         return str(remote_address)
+
+
+def _normalize_singleton_header(headers: Any, name: str) -> str | None:
+    values = _get_all_header_values(headers, name)
+    if not values:
+        return None
+
+    selected_value = values[0]
+    if len(values) > 1:
+        _replace_header(headers, name, selected_value)
+        LOGGER.warning(
+            "Normalized duplicated %s header values in opening handshake. values=%s selected=%s",
+            name,
+            "|".join(values),
+            selected_value,
+        )
+
+    return selected_value
+
+
+def _get_all_header_values(headers: Any, name: str) -> list[str]:
+    try:
+        values = headers.get_all(name)
+    except Exception:
+        return []
+    return [str(value) for value in values if value is not None]
+
+
+def _safe_get_header(headers: Any, name: str) -> str | None:
+    try:
+        value = headers.get(name)
+    except Exception:
+        value = None
+    if value is not None:
+        return str(value)
+
+    values = _get_all_header_values(headers, name)
+    if not values:
+        return None
+    return ",".join(values)
+
+
+def _replace_header(headers: Any, name: str, value: str) -> None:
+    try:
+        del headers[name]
+    except Exception:
+        pass
+    headers[name] = value
 
 
 def _format_command_label(plugin: str | None, name: str) -> str:
