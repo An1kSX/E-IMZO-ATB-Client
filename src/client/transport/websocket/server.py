@@ -6,8 +6,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import websockets
 from websockets.exceptions import ConnectionClosed
+from websockets.legacy.server import serve as legacy_websocket_serve
 
 from client.bootstrap.config import AppConfig
 from client.integrations.eimzo_api import EimzoApiClient
@@ -22,6 +22,7 @@ _CLOSE_CODE_POLICY_VIOLATION = 1008
 _REQUEST_COMPLETED_CLOSE_REASON = "Request completed"
 _SERVER_RELOAD_CLOSE_REASON = "Server certificate reloaded"
 _UNEXPECTED_PATH_CLOSE_REASON = "Unexpected WebSocket path"
+_LEGACY_SERVER_CLOSE_REASON = "Server closed"
 
 
 class WebSocketPortInUseError(RuntimeError):
@@ -112,11 +113,19 @@ class WebSocketProxyServer:
 
             await self._certificate_rotation_event.wait()
             LOGGER.info("Reloading local WebSocket servers to apply renewed certificate.")
-            secure_server.close(code=_CLOSE_CODE_GOING_AWAY, reason=_SERVER_RELOAD_CLOSE_REASON)
+            self._close_server_with_reason(
+                secure_server,
+                code=_CLOSE_CODE_GOING_AWAY,
+                reason=_SERVER_RELOAD_CLOSE_REASON,
+            )
             await secure_server.wait_closed()
             if insecure_server is not None:
                 LOGGER.info("Reloading local WS server on %s.", insecure_bind_url)
-                insecure_server.close(code=_CLOSE_CODE_GOING_AWAY, reason=_SERVER_RELOAD_CLOSE_REASON)
+                self._close_server_with_reason(
+                    insecure_server,
+                    code=_CLOSE_CODE_GOING_AWAY,
+                    reason=_SERVER_RELOAD_CLOSE_REASON,
+                )
                 await insecure_server.wait_closed()
 
     async def _start_listener(
@@ -129,7 +138,7 @@ class WebSocketProxyServer:
     ) -> Any:
         try:
             return await stack.enter_async_context(
-                websockets.serve(
+                legacy_websocket_serve(
                     self._handle_connection,
                     host=self._config.ws_host,
                     port=port,
@@ -147,6 +156,20 @@ class WebSocketProxyServer:
                     endpoint_label=endpoint_label,
                 ) from error
             raise
+
+    def _close_server_with_reason(self, server: Any, *, code: int, reason: str) -> None:
+        try:
+            server.close(code=code, reason=reason)
+        except TypeError:
+            # websockets.legacy server API doesn't accept close code/reason kwargs.
+            server.close()
+            LOGGER.debug(
+                "Legacy WebSocket server close called without explicit code/reason. "
+                "requested_code=%s requested_reason=%s fallback_reason=%s",
+                code,
+                reason,
+                _LEGACY_SERVER_CLOSE_REASON,
+            )
 
     def _resolve_insecure_port(self) -> int | None:
         raw_value = getattr(self._config, "ws_insecure_port", None)
