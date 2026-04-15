@@ -101,7 +101,7 @@ class KeyIdentityStore:
 def extract_key_identity(*, key_alias: str | None, key_subject: str | None) -> KeyIdentity | None:
     subject_identity = _extract_key_identity_from_subject(key_subject)
     alias_identity = _extract_key_identity_from_key_alias(key_alias)
-    prefer_inn_first = _alias_prefers_inn_first(key_alias)
+    prefer_inn_first = _alias_prefers_inn_first(key_alias) or _subject_prefers_inn_first(key_subject)
 
     inn = subject_identity.inn if subject_identity and subject_identity.inn else None
     pinfl = subject_identity.pinfl if subject_identity and subject_identity.pinfl else None
@@ -192,7 +192,16 @@ def _alias_prefers_inn_first(key_alias: str | None) -> bool:
         normalized_alias = normalized_alias[2:].strip()
 
     normalized_alias_casefolded = normalized_alias.casefold()
-    return "o" in normalized_alias_casefolded
+    return "o" in normalized_alias_casefolded or "о" in normalized_alias_casefolded
+
+
+def _subject_prefers_inn_first(key_subject: str | None) -> bool:
+    if not isinstance(key_subject, str) or not key_subject.strip():
+        return False
+
+    attributes = _parse_subject_attributes(key_subject)
+    organization = attributes.get("o")
+    return isinstance(organization, str) and bool(organization.strip())
 
 
 def _normalize_identity_value(value: str | None, *, expected_length: int) -> str | None:

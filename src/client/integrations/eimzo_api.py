@@ -336,6 +336,7 @@ class EimzoApiClient:
             )
 
         request_arguments = list(arguments)
+        _remove_reverse_identity_suffix(arguments=request_arguments, identity_values=identity_values)
         if not _arguments_end_with_identity_values(arguments=request_arguments, identity_values=identity_values):
             request_arguments.extend(identity_values)
             LOGGER.info(
@@ -642,6 +643,20 @@ def _arguments_end_with_identity_values(*, arguments: list[Any], identity_values
     if len(arguments) < len(identity_values):
         return False
     return arguments[-len(identity_values) :] == identity_values
+
+
+def _remove_reverse_identity_suffix(*, arguments: list[Any], identity_values: list[str]) -> None:
+    if len(identity_values) != 2:
+        return
+    if len(arguments) < 2:
+        return
+
+    reverse_values = [identity_values[1], identity_values[0]]
+    if reverse_values == identity_values:
+        return
+
+    if arguments[-2:] == reverse_values:
+        del arguments[-2:]
 
 
 def _format_identity_for_prompt(identity: KeyIdentity) -> str | None:
