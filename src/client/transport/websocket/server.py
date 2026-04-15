@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import logging
 from pathlib import Path
 from typing import Any
@@ -24,10 +25,18 @@ _UNEXPECTED_PATH_CLOSE_REASON = "Unexpected WebSocket path"
 
 
 class WebSocketPortInUseError(RuntimeError):
-    def __init__(self, *, host: str, port: int, error: OSError) -> None:
-        super().__init__(f"WebSocket port {host}:{port} is already in use: {error}")
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        error: OSError,
+        endpoint_label: str = "WSS",
+    ) -> None:
+        super().__init__(f"WebSocket {endpoint_label} port {host}:{port} is already in use: {error}")
         self.host = host
         self.port = port
+        self.endpoint_label = endpoint_label
 
 
 class WebSocketProxyServer:
@@ -52,6 +61,8 @@ class WebSocketProxyServer:
                 await self._serve_until_certificate_rotation()
             except asyncio.CancelledError:
                 raise
+            except WebSocketPortInUseError:
+                raise
             except OSError as error:
                 if _is_address_in_use_error(error):
                     raise WebSocketPortInUseError(
@@ -60,13 +71,13 @@ class WebSocketProxyServer:
                         error=error,
                     ) from error
                 LOGGER.exception(
-                    "Local WSS server failed. Restarting in %.1f seconds.",
+                    "Local WebSocket server failed. Restarting in %.1f seconds.",
                     self._config.server_retry_delay_seconds,
                 )
                 await asyncio.sleep(self._config.server_retry_delay_seconds)
             except Exception:
                 LOGGER.exception(
-                    "Local WSS server failed. Restarting in %.1f seconds.",
+                    "Local WebSocket server failed. Restarting in %.1f seconds.",
                     self._config.server_retry_delay_seconds,
                 )
                 await asyncio.sleep(self._config.server_retry_delay_seconds)
@@ -78,19 +89,87 @@ class WebSocketProxyServer:
             key_path=self._server_key_path,
         )
 
-        async with websockets.serve(
-            self._handle_connection,
-            host=self._config.ws_host,
-            port=self._config.ws_port,
-            ssl=ssl_context,
-            ping_interval=self._config.ws_ping_interval_seconds,
-            ping_timeout=self._config.ws_ping_timeout_seconds,
-        ) as server:
+        insecure_port = self._resolve_insecure_port()
+        async with AsyncExitStack() as stack:
+            secure_server = await self._start_listener(
+                stack=stack,
+                port=self._config.ws_port,
+                ssl_context=ssl_context,
+                endpoint_label="WSS",
+            )
             LOGGER.info("Local WSS server is listening on %s", self._config.websocket_bind_url())
+            insecure_server = None
+            insecure_bind_url: str | None = None
+            if insecure_port is not None:
+                insecure_server = await self._start_listener(
+                    stack=stack,
+                    port=insecure_port,
+                    ssl_context=None,
+                    endpoint_label="WS",
+                )
+                insecure_bind_url = self._resolve_insecure_bind_url(insecure_port)
+                LOGGER.info("Local WS server is listening on %s", insecure_bind_url)
+
             await self._certificate_rotation_event.wait()
-            LOGGER.info("Reloading local WSS server to apply renewed certificate.")
-            server.close(code=_CLOSE_CODE_GOING_AWAY, reason=_SERVER_RELOAD_CLOSE_REASON)
-            await server.wait_closed()
+            LOGGER.info("Reloading local WebSocket servers to apply renewed certificate.")
+            secure_server.close(code=_CLOSE_CODE_GOING_AWAY, reason=_SERVER_RELOAD_CLOSE_REASON)
+            await secure_server.wait_closed()
+            if insecure_server is not None:
+                LOGGER.info("Reloading local WS server on %s.", insecure_bind_url)
+                insecure_server.close(code=_CLOSE_CODE_GOING_AWAY, reason=_SERVER_RELOAD_CLOSE_REASON)
+                await insecure_server.wait_closed()
+
+    async def _start_listener(
+        self,
+        *,
+        stack: AsyncExitStack,
+        port: int,
+        ssl_context: Any | None,
+        endpoint_label: str,
+    ) -> Any:
+        try:
+            return await stack.enter_async_context(
+                websockets.serve(
+                    self._handle_connection,
+                    host=self._config.ws_host,
+                    port=port,
+                    ssl=ssl_context,
+                    ping_interval=self._config.ws_ping_interval_seconds,
+                    ping_timeout=self._config.ws_ping_timeout_seconds,
+                )
+            )
+        except OSError as error:
+            if _is_address_in_use_error(error):
+                raise WebSocketPortInUseError(
+                    host=self._config.ws_host,
+                    port=port,
+                    error=error,
+                    endpoint_label=endpoint_label,
+                ) from error
+            raise
+
+    def _resolve_insecure_port(self) -> int | None:
+        raw_value = getattr(self._config, "ws_insecure_port", None)
+        if raw_value is None:
+            return None
+
+        try:
+            port = int(raw_value)
+        except (TypeError, ValueError):
+            LOGGER.warning("Ignoring invalid WS insecure port value: %r", raw_value)
+            return None
+
+        if port <= 0:
+            return None
+        return port
+
+    def _resolve_insecure_bind_url(self, port: int) -> str:
+        bind_url_factory = getattr(self._config, "websocket_insecure_bind_url", None)
+        if callable(bind_url_factory):
+            bind_url = bind_url_factory()
+            if bind_url:
+                return bind_url
+        return f"ws://{self._config.ws_host}:{port}{self._config.ws_path}"
 
     async def _handle_connection(self, websocket: Any, path: str | None = None) -> None:
         request_path = self._resolve_request_path(websocket, path)
@@ -98,7 +177,7 @@ class WebSocketProxyServer:
         remote_address = self._resolve_remote_address(websocket)
         if not self._config.matches_websocket_path(request_path):
             LOGGER.warning(
-                "Rejected WSS connection on unexpected path: path=%s origin=%s remote=%s",
+                "Rejected WebSocket connection on unexpected path: path=%s origin=%s remote=%s",
                 request_path,
                 origin,
                 remote_address,
@@ -122,7 +201,7 @@ class WebSocketProxyServer:
                 return
         except ConnectionClosed as error:
             LOGGER.info(
-                "Local WSS connection closed: path=%s origin=%s remote=%s received_close=%s sent_close=%s",
+                "Local WebSocket connection closed: path=%s origin=%s remote=%s received_close=%s sent_close=%s",
                 request_path,
                 origin,
                 remote_address,
@@ -143,7 +222,7 @@ class WebSocketProxyServer:
             command = parse_proxy_command(raw_message)
             command_label = _format_command_label(command.plugin, command.name)
             LOGGER.info(
-                "Received WSS command: command=%s has_arguments=%s origin=%s path=%s remote=%s",
+                "Received WebSocket command: command=%s has_arguments=%s origin=%s path=%s remote=%s",
                 command_label,
                 command.has_arguments,
                 origin,
@@ -159,7 +238,7 @@ class WebSocketProxyServer:
             )
         except Exception:
             LOGGER.exception(
-                "Failed to process local WSS message: origin=%s path=%s remote=%s",
+                "Failed to process local WebSocket message: origin=%s path=%s remote=%s",
                 origin,
                 request_path,
                 remote_address,

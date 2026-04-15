@@ -92,7 +92,10 @@ async def run_app(config: AppConfig) -> None:
                         conflict=error,
                     )
                     if not should_retry:
-                        LOGGER.info("Startup was cancelled because WSS port %s is already in use.", error.port)
+                        LOGGER.info(
+                            "Startup was cancelled because WebSocket port %s is already in use.",
+                            error.port,
+                        )
                         return
     finally:
         prompt_service.close()
@@ -107,14 +110,17 @@ async def _resolve_port_conflict(
     prompt_service: PromptService,
     conflict: WebSocketPortInUseError,
 ) -> bool:
-    listening_process = find_listening_process_by_port(port=config.ws_port)
+    listening_process = find_listening_process_by_port(port=conflict.port)
     _PORT_CONFLICT_LOGGER.info(
         "Port conflict flow started. port=%s initial_process=%s",
         conflict.port,
         listening_process,
     )
     if listening_process is None:
-        LOGGER.error("WSS port %s is already in use, but process owner could not be determined.", conflict.port)
+        LOGGER.error(
+            "WebSocket port %s is already in use, but process owner could not be determined.",
+            conflict.port,
+        )
         _PORT_CONFLICT_LOGGER.error(
             "Port conflict flow aborted because process owner could not be determined. port=%s",
             conflict.port,
@@ -130,7 +136,7 @@ async def _resolve_port_conflict(
 
     if not is_eimzo_process(listening_process):
         LOGGER.error(
-            "WSS port %s is already in use by %s (PID %s).",
+            "WebSocket port %s is already in use by %s (PID %s).",
             conflict.port,
             listening_process.name,
             listening_process.pid,
@@ -193,19 +199,19 @@ async def _resolve_port_conflict(
                 stopped,
             )
         if stopped:
-            port_released = await _wait_for_port_release(port=config.ws_port)
+            port_released = await _wait_for_port_release(port=conflict.port)
             _PORT_CONFLICT_LOGGER.info(
                 "Port release wait finished. port=%s released=%s",
-                config.ws_port,
+                conflict.port,
                 port_released,
             )
             if not port_released:
                 LOGGER.warning(
-                    "Requested E-IMZO shutdown succeeded for PID %s, but WSS port %s is still busy.",
+                    "Requested E-IMZO shutdown succeeded for PID %s, but WebSocket port %s is still busy.",
                     listening_process.pid,
                     conflict.port,
                 )
-                refreshed_process = find_listening_process_by_port(port=config.ws_port)
+                refreshed_process = find_listening_process_by_port(port=conflict.port)
                 _PORT_CONFLICT_LOGGER.warning(
                     "Port is still busy after stop attempt. refreshed_process=%s",
                     refreshed_process,
@@ -242,12 +248,12 @@ async def _resolve_port_conflict(
                 continue
 
             LOGGER.info(
-                "Terminated %s (PID %s) and will retry WSS startup.",
+                "Terminated %s (PID %s) and will retry WebSocket startup.",
                 listening_process.name,
                 listening_process.pid,
             )
             _PORT_CONFLICT_LOGGER.info(
-                "Port conflict flow succeeded. Retrying WSS startup. process=%s",
+                "Port conflict flow succeeded. Retrying WebSocket startup. process=%s",
                 listening_process,
             )
             return True
@@ -268,7 +274,7 @@ async def _resolve_port_conflict(
                 "Попробуйте закрыть E-IMZO вручную или повторите попытку."
             ),
         )
-        refreshed_process = find_listening_process_by_port(port=config.ws_port)
+        refreshed_process = find_listening_process_by_port(port=conflict.port)
         _PORT_CONFLICT_LOGGER.info(
             "Refreshed process after failed stop attempt. refreshed_process=%s",
             refreshed_process,

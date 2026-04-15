@@ -191,6 +191,12 @@ def maybe_start_self_update_from_github_release_with_notification(
         LOGGER.error("Could not write updater script %s: %s", updater_script, error)
         return False
 
+    if notify_user is not None:
+        try:
+            notify_user(UpdateNotification(stage="installing", release=release))
+        except Exception:
+            LOGGER.exception("Could not show auto-update notification for release %s.", release.tag_name)
+
     if not _start_updater_script(
         updater_script,
         updater_start_marker,
@@ -201,12 +207,6 @@ def maybe_start_self_update_from_github_release_with_notification(
     ):
         LOGGER.error("Auto-update aborted because updater script could not be started.")
         return False
-
-    if notify_user is not None:
-        try:
-            notify_user(UpdateNotification(stage="installing", release=release))
-        except Exception:
-            LOGGER.exception("Could not show auto-update notification for release %s.", release.tag_name)
 
     try:
         _save_update_state(
@@ -530,12 +530,22 @@ def _write_updater_script(
         ")\n"
         "\n"
         ":AfterCopy\n"
+        "if not \"%CopySucceeded%\"==\"1\" (\n"
+        "    call :WriteUpdateLog Copy never succeeded; target executable was not replaced.\n"
+        "    goto Finish\n"
+        ")\n"
+        "\n"
         "set \"_MEIPASS2=\"\n"
         "set \"_PYI_APPLICATION_HOME_DIR=\"\n"
         "set \"_PYI_PARENT_PROCESS_LEVEL=\"\n"
         "set \"_PYI_SPLASH_IPC=\"\n"
         "set \"PYINSTALLER_RESET_ENVIRONMENT=1\"\n"
         "call :WriteUpdateLog Cleared PyInstaller bootstrap environment variables before launching the updated executable.\n"
+        "tasklist /FI \"PID eq %TargetPid%\" 2>NUL | findstr /R /C:\"\\<%TargetPid%\\>\" >NUL\n"
+        "if not errorlevel 1 (\n"
+        "    call :WriteUpdateLog Target process is still running; skipping launch to avoid duplicate instances.\n"
+        "    goto Finish\n"
+        ")\n"
         "start \"\" \"%TargetPath%\" >NUL 2>&1\n"
         "if errorlevel 1 (\n"
         "    call :WriteUpdateLog Failed to start updated executable. error=%errorlevel%\n"
@@ -543,17 +553,14 @@ def _write_updater_script(
         "    call :WriteUpdateLog Started updated executable successfully.\n"
         ")\n"
         "\n"
-        "if \"%CopySucceeded%\"==\"1\" (\n"
-        "    del /F /Q \"%SourcePath%\" >NUL 2>&1\n"
-        "    if errorlevel 1 (\n"
-        "        call :WriteUpdateLog Failed to remove temporary update payload. error=%errorlevel%\n"
-        "    ) else (\n"
-        "        call :WriteUpdateLog Removed temporary update payload.\n"
-        "    )\n"
+        "del /F /Q \"%SourcePath%\" >NUL 2>&1\n"
+        "if errorlevel 1 (\n"
+        "    call :WriteUpdateLog Failed to remove temporary update payload. error=%errorlevel%\n"
         ") else (\n"
-        "    call :WriteUpdateLog Copy never succeeded; target executable was not replaced.\n"
+        "    call :WriteUpdateLog Removed temporary update payload.\n"
         ")\n"
         "\n"
+        ":Finish\n"
         "call :WriteUpdateLog Updater script finished.\n"
         "start \"\" /B cmd /C del /F /Q \"%~f0\" >NUL 2>&1\n"
         "exit /b 0\n"

@@ -28,6 +28,7 @@ class AppConfig:
     windows_auto_start_enabled: bool
     ws_host: str
     ws_port: int
+    ws_insecure_port: int | None
     ws_path: str
     ws_server_cert_path: Path | None
     ws_server_key_path: Path | None
@@ -71,6 +72,7 @@ class AppConfig:
             windows_auto_start_enabled=_read_bool("WINDOWS_AUTO_START", default=True),
             ws_host=os.getenv("WS_SERVER_HOST", "127.0.0.1"),
             ws_port=_read_int("WS_SERVER_PORT", default=64443),
+            ws_insecure_port=_read_optional_int("WS_SERVER_INSECURE_PORT", default=64646),
             ws_path=_normalize_ws_path(os.getenv("WS_SERVER_PATH", "/")),
             ws_server_cert_path=_read_optional_path("WS_SERVER_CERT_PATH"),
             ws_server_key_path=_read_optional_path("WS_SERVER_KEY_PATH"),
@@ -101,6 +103,11 @@ class AppConfig:
     def websocket_bind_url(self) -> str:
         return f"wss://{self.ws_host}:{self.ws_port}{self.ws_path}"
 
+    def websocket_insecure_bind_url(self) -> str | None:
+        if self.ws_insecure_port is None:
+            return None
+        return f"ws://{self.ws_host}:{self.ws_insecure_port}{self.ws_path}"
+
     def matches_websocket_path(self, path: str | None) -> bool:
         normalized_request_path = _normalize_request_path(path)
         normalized_configured_path = _normalize_request_path(self.ws_path)
@@ -117,6 +124,10 @@ class AppConfig:
         if (self.ws_server_cert_path is None) != (self.ws_server_key_path is None):
             raise ConfigurationError(
                 "WS_SERVER_CERT_PATH and WS_SERVER_KEY_PATH must be provided together."
+            )
+        if self.ws_insecure_port is not None and self.ws_insecure_port == self.ws_port:
+            raise ConfigurationError(
+                "WS_SERVER_INSECURE_PORT must differ from WS_SERVER_PORT."
             )
 
         _validate_optional_file(
@@ -260,6 +271,25 @@ def _read_int(name: str, *, default: int) -> int:
         return int(value)
     except ValueError as error:
         raise ConfigurationError(f"{name} must be an integer, got {value!r}.") from error
+
+
+def _read_optional_int(name: str, *, default: int | None = None) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    normalized = value.strip()
+    if normalized == "":
+        return default
+
+    try:
+        parsed_value = int(normalized)
+    except ValueError as error:
+        raise ConfigurationError(f"{name} must be an integer, got {value!r}.") from error
+
+    if parsed_value <= 0:
+        return None
+    return parsed_value
 
 
 def _read_bool(name: str, *, default: bool) -> bool:
