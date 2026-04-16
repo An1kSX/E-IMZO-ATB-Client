@@ -50,6 +50,8 @@ class KeyIdentityStore:
     def __init__(self, *, max_entries: int = MAX_STORED_KEY_IDS) -> None:
         self._max_entries = max_entries
         self._identities_by_scoped_key_id: OrderedDict[_KeyScope, KeyIdentity] = OrderedDict()
+        self._identity_history_by_scoped_key_id: OrderedDict[_KeyScope, KeyIdentity] = OrderedDict()
+        self._scoped_key_ids_by_identity_value: dict[str, OrderedDict[_KeyScope, None]] = {}
 
     def remember(
         self,
@@ -70,6 +72,13 @@ class KeyIdentityStore:
         scoped_key_id = (origin, key_id)
         self._identities_by_scoped_key_id.pop(scoped_key_id, None)
         self._identities_by_scoped_key_id[scoped_key_id] = identity
+        previous_identity = self._identity_history_by_scoped_key_id.get(scoped_key_id)
+        if previous_identity is not None:
+            self._unindex_identity_values(scoped_key_id, previous_identity)
+
+        self._identity_history_by_scoped_key_id.pop(scoped_key_id, None)
+        self._identity_history_by_scoped_key_id[scoped_key_id] = identity
+        self._index_identity_values(scoped_key_id, identity)
         self._trim_to_capacity()
         return identity
 
@@ -80,22 +89,114 @@ class KeyIdentityStore:
         return identity.first_available()
 
     def get_key_identity(self, key_id: str, *, origin: str | None = None) -> KeyIdentity | None:
-        identity = self._identities_by_scoped_key_id.get((origin, key_id))
-        if identity is not None:
-            return identity
+        active_identity = self._get_key_identity_from_mapping(
+            self._identities_by_scoped_key_id,
+            key_id=key_id,
+            origin=origin,
+        )
+        if active_identity is not None:
+            return self._merge_related_identity_values(active_identity, origin=origin)
 
-        for (stored_origin, stored_key_id), stored_identity in reversed(self._identities_by_scoped_key_id.items()):
-            if stored_key_id != key_id:
-                continue
-            if stored_origin == origin:
-                continue
-            return stored_identity
-
+        historical_identity = self._get_key_identity_from_mapping(
+            self._identity_history_by_scoped_key_id,
+            key_id=key_id,
+            origin=origin,
+        )
+        if historical_identity is not None:
+            return self._merge_related_identity_values(historical_identity, origin=origin)
         return None
 
     def _trim_to_capacity(self) -> None:
         while len(self._identities_by_scoped_key_id) > self._max_entries:
             self._identities_by_scoped_key_id.popitem(last=False)
+
+    @staticmethod
+    def _get_key_identity_from_mapping(
+        mapping: OrderedDict[_KeyScope, KeyIdentity],
+        *,
+        key_id: str,
+        origin: str | None,
+    ) -> KeyIdentity | None:
+        identity = mapping.get((origin, key_id))
+        if identity is not None:
+            return identity
+
+        for (stored_origin, stored_key_id), stored_identity in reversed(mapping.items()):
+            if stored_key_id != key_id:
+                continue
+            if stored_origin == origin:
+                continue
+            return stored_identity
+        return None
+
+    def _index_identity_values(self, scoped_key_id: _KeyScope, identity: KeyIdentity) -> None:
+        for identity_value in _iter_identity_values(identity):
+            scoped_key_ids = self._scoped_key_ids_by_identity_value.setdefault(identity_value, OrderedDict())
+            scoped_key_ids.pop(scoped_key_id, None)
+            scoped_key_ids[scoped_key_id] = None
+
+    def _unindex_identity_values(self, scoped_key_id: _KeyScope, identity: KeyIdentity) -> None:
+        for identity_value in _iter_identity_values(identity):
+            scoped_key_ids = self._scoped_key_ids_by_identity_value.get(identity_value)
+            if scoped_key_ids is None:
+                continue
+            scoped_key_ids.pop(scoped_key_id, None)
+            if not scoped_key_ids:
+                self._scoped_key_ids_by_identity_value.pop(identity_value, None)
+
+    def _merge_related_identity_values(self, identity: KeyIdentity, *, origin: str | None) -> KeyIdentity:
+        merged_inn = identity.inn
+        merged_pinfl = identity.pinfl
+        merged_prefer_inn_first = identity.prefer_inn_first
+
+        for scoped_key_id in self._iter_related_scoped_key_ids(identity, origin=origin):
+            related_identity = self._identity_history_by_scoped_key_id.get(scoped_key_id)
+            if related_identity is None:
+                continue
+
+            if merged_inn is None and related_identity.inn:
+                merged_inn = related_identity.inn
+            if merged_pinfl is None and related_identity.pinfl:
+                merged_pinfl = related_identity.pinfl
+            if not merged_prefer_inn_first and related_identity.prefer_inn_first:
+                merged_prefer_inn_first = True
+
+            if merged_inn is not None and merged_pinfl is not None and merged_prefer_inn_first:
+                break
+
+        if (
+            merged_inn == identity.inn
+            and merged_pinfl == identity.pinfl
+            and merged_prefer_inn_first == identity.prefer_inn_first
+        ):
+            return identity
+        return KeyIdentity(
+            inn=merged_inn,
+            pinfl=merged_pinfl,
+            prefer_inn_first=merged_prefer_inn_first,
+        )
+
+    def _iter_related_scoped_key_ids(self, identity: KeyIdentity, *, origin: str | None) -> list[_KeyScope]:
+        same_origin_scoped_key_ids: list[_KeyScope] = []
+        cross_origin_scoped_key_ids: list[_KeyScope] = []
+        seen_scoped_key_ids: set[_KeyScope] = set()
+
+        for identity_value in _iter_identity_values(identity):
+            scoped_key_ids = self._scoped_key_ids_by_identity_value.get(identity_value)
+            if scoped_key_ids is None:
+                continue
+
+            for scoped_key_id in reversed(scoped_key_ids):
+                if scoped_key_id in seen_scoped_key_ids:
+                    continue
+
+                seen_scoped_key_ids.add(scoped_key_id)
+                if scoped_key_id[0] == origin:
+                    same_origin_scoped_key_ids.append(scoped_key_id)
+                else:
+                    cross_origin_scoped_key_ids.append(scoped_key_id)
+
+        return [*same_origin_scoped_key_ids, *cross_origin_scoped_key_ids]
 
 
 def extract_key_identity(*, key_alias: str | None, key_subject: str | None) -> KeyIdentity | None:
@@ -213,6 +314,15 @@ def _normalize_identity_value(value: str | None, *, expected_length: int) -> str
         return None
 
     return digits[:expected_length]
+
+
+def _iter_identity_values(identity: KeyIdentity) -> tuple[str, ...]:
+    values: list[str] = []
+    if identity.inn is not None:
+        values.append(identity.inn)
+    if identity.pinfl is not None:
+        values.append(identity.pinfl)
+    return tuple(values)
 
 
 def extract_identity_from_key_name(key_name: str) -> str | None:
