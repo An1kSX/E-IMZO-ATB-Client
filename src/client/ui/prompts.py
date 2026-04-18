@@ -149,11 +149,6 @@ def _schedule_dialog_focus(
         except Exception:
             pass
 
-        try:
-            target.focus_force()
-        except Exception:
-            pass
-
         if select_all:
             try:
                 target.selection_range(0, "end")
@@ -166,11 +161,8 @@ def _schedule_dialog_focus(
             pass
 
     try:
-        dialog.after_idle(_activate)
         dialog.after(0, _activate)
         dialog.after(120, _activate)
-        dialog.after(280, _activate)
-        dialog.after(500, _activate)
     except Exception:
         pass
 
@@ -259,7 +251,6 @@ def _show_manual_password_dialog(*, parent: object) -> str | None:
         def __init__(self, dialog_parent: object) -> None:
             self._password_var = tk.StringVar()
             self._validation_message_var = tk.StringVar(value="")
-            self._password_entry: tk.Widget | None = None
             self.result = None
             super().__init__(dialog_parent, title="Ввод пароля вручную")
 
@@ -297,7 +288,6 @@ def _show_manual_password_dialog(*, parent: object) -> str | None:
                 width=36,
             )
             password_entry.grid(row=3, column=0, sticky="we")
-            self._password_entry = password_entry
             _schedule_dialog_focus(self, focus_widget=password_entry)
             return password_entry
 
@@ -308,8 +298,6 @@ def _show_manual_password_dialog(*, parent: object) -> str | None:
             approve_button = ttk.Button(box, text="ОК", width=14, command=self.ok, default="active")
             approve_button.grid(row=0, column=0, padx=(0, 8))
             ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
-            if self._password_entry is not None:
-                _schedule_dialog_focus(self, focus_widget=self._password_entry)
 
             self.bind("<Return>", self.ok)
             self.bind("<Escape>", self.cancel)
@@ -344,7 +332,6 @@ def _show_password_dialog(
         def __init__(self, parent: tk.Misc) -> None:
             self._password_var = tk.StringVar()
             self._validation_message_var = tk.StringVar(value=error_message or "")
-            self._password_entry: tk.Widget | None = None
             self.result = None
             super().__init__(parent, title="Вход в E-IMZO")
 
@@ -398,7 +385,6 @@ def _show_password_dialog(
                 width=36,
             )
             password_entry.grid(row=5, column=0, sticky="we")
-            self._password_entry = password_entry
             _schedule_dialog_focus(self, focus_widget=password_entry)
             return password_entry
 
@@ -409,8 +395,6 @@ def _show_password_dialog(
             login_button = ttk.Button(box, text="Войти", width=14, command=self.ok, default="active")
             login_button.grid(row=0, column=0, padx=(0, 8))
             ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
-            if self._password_entry is not None:
-                _schedule_dialog_focus(self, focus_widget=self._password_entry)
 
             self.bind("<Return>", self.ok)
             self.bind("<Escape>", self.cancel)
@@ -535,7 +519,6 @@ def _show_api_base_url_dialog(
         def __init__(self, parent: tk.Misc) -> None:
             self._url_var = tk.StringVar(value=initial_value or "")
             self._validation_message_var = tk.StringVar(value=error_message or "")
-            self._url_entry: tk.Widget | None = None
             self.result = None
             super().__init__(parent, title="Настройка E-IMZO API")
 
@@ -581,7 +564,6 @@ def _show_api_base_url_dialog(
                 width=44,
             )
             url_entry.grid(row=4, column=0, sticky="we")
-            self._url_entry = url_entry
             _schedule_dialog_focus(self, focus_widget=url_entry, select_all=True)
             return url_entry
 
@@ -592,8 +574,6 @@ def _show_api_base_url_dialog(
             save_button = ttk.Button(box, text="Сохранить", width=14, command=self.ok, default="active")
             save_button.grid(row=0, column=0, padx=(0, 8))
             ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
-            if self._url_entry is not None:
-                _schedule_dialog_focus(self, focus_widget=self._url_entry, select_all=True)
 
             self.bind("<Return>", self.ok)
             self.bind("<Escape>", self.cancel)
