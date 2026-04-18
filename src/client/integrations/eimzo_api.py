@@ -14,7 +14,7 @@ import aiohttp
 from client.domain.commands import ProxyCommand
 from client.domain.key_identity_store import KeyIdentity, KeyIdentityStore
 from client.system.certificates import build_client_ssl_context
-from client.ui.prompts import PromptService, TkPromptService
+from client.ui.prompts import PromptService, SensitiveOperationConfirmation, TkPromptService
 
 _TEXTUAL_CONTENT_TYPES = {
     "application/javascript",
@@ -33,18 +33,16 @@ _AUTH_PLUGIN_NAME = "auth"
 _AUTH_LOGIN_COMMAND_NAME = "login"
 _AUTH_INVALID_STATUS_CODES = {400, 401, 403}
 _ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 30.0
-_SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS = 3.0
+_SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS = 2.0
 _MISSING = object()
 _IDENTITY_ARGUMENT_KEY_ID_INDEXES: dict[tuple[str | None, str], int] = {
     (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME): 1,
     (_PKCS7_PLUGIN_NAME, _APPEND_PKCS7_ATTACHED_COMMAND_NAME): 1,
-    (_PFX_PLUGIN_NAME, _VERIFY_PASSWORD_COMMAND_NAME): 0,
     (_PFX_PLUGIN_NAME, _CHANGE_PASSWORD_COMMAND_NAME): 0,
 }
 _SENSITIVE_CONFIRMATION_COOLDOWN_COMMANDS: set[tuple[str | None, str]] = {
     (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME),
     (_PKCS7_PLUGIN_NAME, _APPEND_PKCS7_ATTACHED_COMMAND_NAME),
-    (_PFX_PLUGIN_NAME, _VERIFY_PASSWORD_COMMAND_NAME),
 }
 _SENSITIVE_CONFIRMATION_COOLDOWN_GROUP_PASSWORD_AUTOFILL = "password_autofill"
 LOGGER = logging.getLogger(__name__)
@@ -166,6 +164,7 @@ class EimzoApiClient:
             )
             return _failed_proxy_response(prepared_request.error_message)
 
+        manual_password: str | None = None
         if prepared_request.sensitive_identity is not None:
             cooldown_key = self._build_sensitive_confirmation_cooldown_key(
                 command=command,
@@ -186,17 +185,37 @@ class EimzoApiClient:
                         )
                         approved = True
                     else:
-                        approved = await self._prompt_service.confirm_sensitive_operation(
-                            command=command,
-                            identity=prepared_request.sensitive_identity,
+                        confirmation = _normalize_sensitive_confirmation(
+                            await self._prompt_service.confirm_sensitive_operation(
+                                command=command,
+                                identity=prepared_request.sensitive_identity,
+                            )
                         )
+                        approved = confirmation.approved
+                        manual_password = confirmation.manual_password
+                        if manual_password is not None:
+                            LOGGER.info(
+                                "Using manually entered password for %s.",
+                                command_label,
+                                extra=_USER_ACTION_LOG_EXTRA,
+                            )
                         if approved:
                             self._remember_sensitive_confirmation(cooldown_key)
             else:
-                approved = await self._prompt_service.confirm_sensitive_operation(
-                    command=command,
-                    identity=prepared_request.sensitive_identity,
+                confirmation = _normalize_sensitive_confirmation(
+                    await self._prompt_service.confirm_sensitive_operation(
+                        command=command,
+                        identity=prepared_request.sensitive_identity,
+                    )
                 )
+                approved = confirmation.approved
+                manual_password = confirmation.manual_password
+                if manual_password is not None:
+                    LOGGER.info(
+                        "Using manually entered password for %s.",
+                        command_label,
+                        extra=_USER_ACTION_LOG_EXTRA,
+                    )
 
             if not approved:
                 LOGGER.info(
@@ -206,6 +225,11 @@ class EimzoApiClient:
                     extra=_USER_ACTION_LOG_EXTRA,
                 )
                 return _cancelled_proxy_response()
+
+        request_arguments = _apply_manual_password_argument(
+            arguments=prepared_request.arguments,
+            manual_password=manual_password,
+        )
 
         try:
             token = await self._ensure_access_token(
@@ -217,7 +241,7 @@ class EimzoApiClient:
             response = await self._forward_with_token(
                 command=command,
                 endpoint_url=endpoint_url,
-                request_arguments=prepared_request.arguments,
+                request_arguments=request_arguments,
                 access_token=token,
             )
 
@@ -234,7 +258,7 @@ class EimzoApiClient:
                 response = await self._forward_with_token(
                     command=command,
                     endpoint_url=endpoint_url,
-                    request_arguments=prepared_request.arguments,
+                    request_arguments=request_arguments,
                     access_token=token,
                 )
 
@@ -531,6 +555,40 @@ def _cancelled_proxy_response() -> ProxyResponse:
 
 def _failed_proxy_response(message: str) -> ProxyResponse:
     return ProxyResponse.from_json({"success": False, "message": message})
+
+
+def _normalize_sensitive_confirmation(
+    confirmation: bool | SensitiveOperationConfirmation,
+) -> SensitiveOperationConfirmation:
+    if isinstance(confirmation, SensitiveOperationConfirmation):
+        return confirmation
+
+    return SensitiveOperationConfirmation(approved=bool(confirmation))
+
+
+def _apply_manual_password_argument(*, arguments: Any, manual_password: str | None) -> Any:
+    if manual_password is None:
+        return arguments
+
+    if isinstance(arguments, dict):
+        request_arguments = dict(arguments)
+        request_arguments["password"] = manual_password
+        return request_arguments
+
+    if isinstance(arguments, (list, tuple)):
+        # Preserve positional payload while also providing named `password` argument.
+        return {
+            "arguments": list(arguments),
+            "password": manual_password,
+        }
+
+    if arguments is None:
+        return {"password": manual_password}
+
+    return {
+        "arguments": arguments,
+        "password": manual_password,
+    }
 
 
 def _format_transport_error_message(*, method: str, endpoint_url: str, error: Exception) -> str:

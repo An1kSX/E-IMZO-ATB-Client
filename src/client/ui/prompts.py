@@ -19,13 +19,19 @@ class PortConflictResolution:
     remove_from_autostart: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SensitiveOperationConfirmation:
+    approved: bool
+    manual_password: str | None = None
+
+
 class PromptService(Protocol):
     async def confirm_sensitive_operation(
         self,
         *,
         command: ProxyCommand,
         identity: str,
-    ) -> bool:
+    ) -> SensitiveOperationConfirmation:
         ...
 
     async def request_password(
@@ -58,7 +64,7 @@ class TkPromptService:
         *,
         command: ProxyCommand,
         identity: str,
-    ) -> bool:
+    ) -> SensitiveOperationConfirmation:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
@@ -143,6 +149,11 @@ def _schedule_dialog_focus(
         except Exception:
             pass
 
+        try:
+            target.focus_force()
+        except Exception:
+            pass
+
         if select_all:
             try:
                 target.selection_range(0, "end")
@@ -155,20 +166,27 @@ def _schedule_dialog_focus(
             pass
 
     try:
+        dialog.after_idle(_activate)
         dialog.after(0, _activate)
         dialog.after(120, _activate)
+        dialog.after(280, _activate)
+        dialog.after(500, _activate)
     except Exception:
         pass
 
 
-def _show_confirmation_dialog(*, command_label: str, identity: str) -> bool:
+def _show_confirmation_dialog(
+    *,
+    command_label: str,
+    identity: str,
+) -> SensitiveOperationConfirmation:
     import tkinter as tk
     from tkinter import simpledialog
     from tkinter import ttk
 
     class ConfirmationDialog(simpledialog.Dialog):
         def __init__(self, parent: tk.Misc) -> None:
-            self.result = False
+            self.result = SensitiveOperationConfirmation(approved=False)
             super().__init__(parent, title="Подтверждение операции")
 
         def body(self, master: tk.Misc) -> tk.Widget:
@@ -192,18 +210,115 @@ def _show_confirmation_dialog(*, command_label: str, identity: str) -> bool:
             box = ttk.Frame(self, padding=(16, 0, 16, 16))
             box.pack()
 
-            approve_button = ttk.Button(box, text="Да", width=14, command=self.ok, default="active")
+            approve_button = ttk.Button(box, text="ОК", width=14, command=self.ok, default="active")
             approve_button.grid(row=0, column=0, padx=(0, 8))
-            ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
+            ttk.Button(
+                box,
+                text="Ввести пароль вручную",
+                width=24,
+                command=self._use_manual_password,
+            ).grid(row=0, column=1, padx=(0, 8))
+            ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=2)
             _schedule_dialog_focus(self, focus_widget=approve_button)
 
             self.bind("<Return>", self.ok)
             self.bind("<Escape>", self.cancel)
 
+        def _use_manual_password(self) -> None:
+            password = _show_manual_password_dialog(parent=self)
+            if password is None:
+                return
+
+            self.result = SensitiveOperationConfirmation(
+                approved=True,
+                manual_password=password,
+            )
+            self.destroy()
+
         def apply(self) -> None:
-            self.result = True
+            self.result = SensitiveOperationConfirmation(approved=True)
 
     return _run_dialog(dialog_factory=ConfirmationDialog)
+
+
+def _show_manual_password_dialog(*, parent: object) -> str | None:
+    import tkinter as tk
+    from tkinter import simpledialog
+    from tkinter import ttk
+
+    class ManualPasswordDialog(simpledialog.Dialog):
+        def __init__(self, dialog_parent: object) -> None:
+            self._password_var = tk.StringVar()
+            self._validation_message_var = tk.StringVar(value="")
+            self._password_entry: tk.Widget | None = None
+            self.result = None
+            super().__init__(dialog_parent, title="Ввод пароля вручную")
+
+        def body(self, master: tk.Misc) -> tk.Widget:
+            self.resizable(False, False)
+            self.attributes("-topmost", True)
+
+            container = ttk.Frame(master, padding=16)
+            container.grid(sticky="nsew")
+            container.columnconfigure(0, weight=1)
+
+            ttk.Label(
+                container,
+                text="Введенный пароль будет передан в REST-метод через аргумент password.",
+                wraplength=360,
+                justify="left",
+            ).grid(row=0, column=0, sticky="w")
+
+            validation_label = ttk.Label(
+                container,
+                textvariable=self._validation_message_var,
+                foreground="#b42318",
+                wraplength=360,
+                justify="left",
+                padding=(0, 8, 0, 0),
+            )
+            validation_label.grid(row=1, column=0, sticky="w")
+
+            ttk.Label(container, text="Пароль:", padding=(0, 12, 0, 0)).grid(row=2, column=0, sticky="w")
+
+            password_entry = ttk.Entry(
+                container,
+                textvariable=self._password_var,
+                show="*",
+                width=36,
+            )
+            password_entry.grid(row=3, column=0, sticky="we")
+            self._password_entry = password_entry
+            _schedule_dialog_focus(self, focus_widget=password_entry)
+            return password_entry
+
+        def buttonbox(self) -> None:
+            box = ttk.Frame(self, padding=(16, 0, 16, 16))
+            box.pack()
+
+            approve_button = ttk.Button(box, text="ОК", width=14, command=self.ok, default="active")
+            approve_button.grid(row=0, column=0, padx=(0, 8))
+            ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
+            if self._password_entry is not None:
+                _schedule_dialog_focus(self, focus_widget=self._password_entry)
+
+            self.bind("<Return>", self.ok)
+            self.bind("<Escape>", self.cancel)
+
+        def validate(self) -> bool:
+            password = self._password_var.get()
+            if password:
+                return True
+
+            self._validation_message_var.set("Введите пароль или нажмите «Отменить».")
+            self.bell()
+            return False
+
+        def apply(self) -> None:
+            self.result = self._password_var.get()
+
+    dialog = ManualPasswordDialog(parent)
+    return dialog.result
 
 
 def _show_password_dialog(
@@ -220,6 +335,7 @@ def _show_password_dialog(
         def __init__(self, parent: tk.Misc) -> None:
             self._password_var = tk.StringVar()
             self._validation_message_var = tk.StringVar(value=error_message or "")
+            self._password_entry: tk.Widget | None = None
             self.result = None
             super().__init__(parent, title="Вход в E-IMZO")
 
@@ -273,6 +389,7 @@ def _show_password_dialog(
                 width=36,
             )
             password_entry.grid(row=5, column=0, sticky="we")
+            self._password_entry = password_entry
             _schedule_dialog_focus(self, focus_widget=password_entry)
             return password_entry
 
@@ -283,6 +400,8 @@ def _show_password_dialog(
             login_button = ttk.Button(box, text="Войти", width=14, command=self.ok, default="active")
             login_button.grid(row=0, column=0, padx=(0, 8))
             ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
+            if self._password_entry is not None:
+                _schedule_dialog_focus(self, focus_widget=self._password_entry)
 
             self.bind("<Return>", self.ok)
             self.bind("<Escape>", self.cancel)
@@ -407,6 +526,7 @@ def _show_api_base_url_dialog(
         def __init__(self, parent: tk.Misc) -> None:
             self._url_var = tk.StringVar(value=initial_value or "")
             self._validation_message_var = tk.StringVar(value=error_message or "")
+            self._url_entry: tk.Widget | None = None
             self.result = None
             super().__init__(parent, title="Настройка E-IMZO API")
 
@@ -452,6 +572,7 @@ def _show_api_base_url_dialog(
                 width=44,
             )
             url_entry.grid(row=4, column=0, sticky="we")
+            self._url_entry = url_entry
             _schedule_dialog_focus(self, focus_widget=url_entry, select_all=True)
             return url_entry
 
@@ -462,6 +583,8 @@ def _show_api_base_url_dialog(
             save_button = ttk.Button(box, text="Сохранить", width=14, command=self.ok, default="active")
             save_button.grid(row=0, column=0, padx=(0, 8))
             ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
+            if self._url_entry is not None:
+                _schedule_dialog_focus(self, focus_widget=self._url_entry, select_all=True)
 
             self.bind("<Return>", self.ok)
             self.bind("<Escape>", self.cancel)
@@ -495,7 +618,9 @@ def _show_info_dialog(*, title: str, message: str) -> None:
         root.destroy()
 
 
-def _run_dialog(dialog_factory: type) -> bool | str | PortConflictResolution | None:
+def _run_dialog(
+    dialog_factory: type,
+) -> bool | str | PortConflictResolution | SensitiveOperationConfirmation | None:
     import tkinter as tk
 
     root = tk.Tk()
