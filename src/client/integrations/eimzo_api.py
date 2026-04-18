@@ -44,6 +44,10 @@ _SENSITIVE_CONFIRMATION_COOLDOWN_COMMANDS: set[tuple[str | None, str]] = {
     (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME),
     (_PKCS7_PLUGIN_NAME, _APPEND_PKCS7_ATTACHED_COMMAND_NAME),
 }
+_ARGUMENTS_PASSWORD_BODY_COMMANDS: set[tuple[str | None, str]] = {
+    (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME),
+    (_PKCS7_PLUGIN_NAME, _APPEND_PKCS7_ATTACHED_COMMAND_NAME),
+}
 _SENSITIVE_CONFIRMATION_COOLDOWN_GROUP_PASSWORD_AUTOFILL = "password_autofill"
 LOGGER = logging.getLogger(__name__)
 _USER_ACTION_LOG_EXTRA = {"user_action": True}
@@ -226,7 +230,8 @@ class EimzoApiClient:
                 )
                 return _cancelled_proxy_response()
 
-        request_arguments = _apply_manual_password_argument(
+        request_arguments = _build_forward_request_arguments(
+            command=command,
             arguments=prepared_request.arguments,
             manual_password=manual_password,
         )
@@ -564,6 +569,39 @@ def _normalize_sensitive_confirmation(
         return confirmation
 
     return SensitiveOperationConfirmation(approved=bool(confirmation))
+
+
+def _build_forward_request_arguments(
+    *,
+    command: ProxyCommand,
+    arguments: Any,
+    manual_password: str | None,
+) -> Any:
+    if _command_requires_arguments_password_body(command):
+        return _build_arguments_password_body(arguments=arguments, password=manual_password)
+
+    return _apply_manual_password_argument(arguments=arguments, manual_password=manual_password)
+
+
+def _command_requires_arguments_password_body(command: ProxyCommand) -> bool:
+    return (command.plugin, command.name) in _ARGUMENTS_PASSWORD_BODY_COMMANDS
+
+
+def _build_arguments_password_body(*, arguments: Any, password: str | None) -> dict[str, Any]:
+    if isinstance(arguments, dict):
+        if "arguments" in arguments:
+            payload = dict(arguments)
+        else:
+            payload = {
+                "arguments": arguments,
+            }
+    elif isinstance(arguments, tuple):
+        payload = {"arguments": list(arguments)}
+    else:
+        payload = {"arguments": arguments}
+
+    payload["password"] = password
+    return payload
 
 
 def _apply_manual_password_argument(*, arguments: Any, manual_password: str | None) -> Any:
