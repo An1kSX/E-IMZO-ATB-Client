@@ -14,7 +14,7 @@ import aiohttp
 from client.domain.commands import ProxyCommand
 from client.domain.key_identity_store import KeyIdentity, KeyIdentityStore
 from client.system.certificates import build_client_ssl_context
-from client.ui.prompts import PromptService, SensitiveOperationConfirmation, TkPromptService
+from client.ui.prompts import PromptService, TkPromptService
 
 _TEXTUAL_CONTENT_TYPES = {
     "application/javascript",
@@ -164,7 +164,6 @@ class EimzoApiClient:
             )
             return _failed_proxy_response(prepared_request.error_message)
 
-        manual_password: str | None = None
         if prepared_request.sensitive_identity is not None:
             cooldown_key = self._build_sensitive_confirmation_cooldown_key(
                 command=command,
@@ -185,37 +184,17 @@ class EimzoApiClient:
                         )
                         approved = True
                     else:
-                        confirmation = _normalize_sensitive_confirmation(
-                            await self._prompt_service.confirm_sensitive_operation(
-                                command=command,
-                                identity=prepared_request.sensitive_identity,
-                            )
+                        approved = await self._prompt_service.confirm_sensitive_operation(
+                            command=command,
+                            identity=prepared_request.sensitive_identity,
                         )
-                        approved = confirmation.approved
-                        manual_password = confirmation.manual_password
-                        if manual_password is not None:
-                            LOGGER.info(
-                                "Using manually entered password for %s.",
-                                command_label,
-                                extra=_USER_ACTION_LOG_EXTRA,
-                            )
                         if approved:
                             self._remember_sensitive_confirmation(cooldown_key)
             else:
-                confirmation = _normalize_sensitive_confirmation(
-                    await self._prompt_service.confirm_sensitive_operation(
-                        command=command,
-                        identity=prepared_request.sensitive_identity,
-                    )
+                approved = await self._prompt_service.confirm_sensitive_operation(
+                    command=command,
+                    identity=prepared_request.sensitive_identity,
                 )
-                approved = confirmation.approved
-                manual_password = confirmation.manual_password
-                if manual_password is not None:
-                    LOGGER.info(
-                        "Using manually entered password for %s.",
-                        command_label,
-                        extra=_USER_ACTION_LOG_EXTRA,
-                    )
 
             if not approved:
                 LOGGER.info(
@@ -225,11 +204,6 @@ class EimzoApiClient:
                     extra=_USER_ACTION_LOG_EXTRA,
                 )
                 return _cancelled_proxy_response()
-
-        request_arguments = _apply_manual_password_argument(
-            arguments=prepared_request.arguments,
-            manual_password=manual_password,
-        )
 
         try:
             token = await self._ensure_access_token(
@@ -241,7 +215,7 @@ class EimzoApiClient:
             response = await self._forward_with_token(
                 command=command,
                 endpoint_url=endpoint_url,
-                request_arguments=request_arguments,
+                request_arguments=prepared_request.arguments,
                 access_token=token,
             )
 
@@ -258,7 +232,7 @@ class EimzoApiClient:
                 response = await self._forward_with_token(
                     command=command,
                     endpoint_url=endpoint_url,
-                    request_arguments=request_arguments,
+                    request_arguments=prepared_request.arguments,
                     access_token=token,
                 )
 
@@ -555,40 +529,6 @@ def _cancelled_proxy_response() -> ProxyResponse:
 
 def _failed_proxy_response(message: str) -> ProxyResponse:
     return ProxyResponse.from_json({"success": False, "message": message})
-
-
-def _normalize_sensitive_confirmation(
-    confirmation: bool | SensitiveOperationConfirmation,
-) -> SensitiveOperationConfirmation:
-    if isinstance(confirmation, SensitiveOperationConfirmation):
-        return confirmation
-
-    return SensitiveOperationConfirmation(approved=bool(confirmation))
-
-
-def _apply_manual_password_argument(*, arguments: Any, manual_password: str | None) -> Any:
-    if manual_password is None:
-        return arguments
-
-    if isinstance(arguments, dict):
-        request_arguments = dict(arguments)
-        request_arguments["password"] = manual_password
-        return request_arguments
-
-    if isinstance(arguments, (list, tuple)):
-        # Preserve positional payload while also providing named `password` argument.
-        return {
-            "arguments": list(arguments),
-            "password": manual_password,
-        }
-
-    if arguments is None:
-        return {"password": manual_password}
-
-    return {
-        "arguments": arguments,
-        "password": manual_password,
-    }
 
 
 def _format_transport_error_message(*, method: str, endpoint_url: str, error: Exception) -> str:
