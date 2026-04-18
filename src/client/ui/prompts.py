@@ -225,7 +225,16 @@ def _show_confirmation_dialog(
             self.bind("<Escape>", self.cancel)
 
         def _use_manual_password(self) -> None:
-            password = _show_manual_password_dialog(parent=self)
+            try:
+                password = _show_manual_password_dialog(parent=self)
+            except Exception:
+                LOGGER.exception("Manual password dialog failed to open.")
+                try:
+                    self.bell()
+                except Exception:
+                    pass
+                return
+
             if password is None:
                 return
 
@@ -628,10 +637,17 @@ def _run_dialog(
     root.attributes("-topmost", True)
 
     try:
-        dialog = dialog_factory(root)
+        try:
+            dialog = dialog_factory(root)
+        except Exception:
+            LOGGER.exception("Prompt dialog failed to initialize.")
+            return None
         return dialog.result
     finally:
-        root.destroy()
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
