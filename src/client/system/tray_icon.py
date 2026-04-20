@@ -56,10 +56,17 @@ _IMAGE_ICON = 1
 _LR_LOADFROMFILE = 0x00000010
 _LR_DEFAULTSIZE = 0x00000040
 
-_user32 = ctypes.windll.user32
-_kernel32 = ctypes.windll.kernel32
-_shell32 = ctypes.windll.shell32
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 _LRESULT = ctypes.c_ssize_t
+_WNDPROC = ctypes.WINFUNCTYPE(
+    _LRESULT,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
 
 
 class _GUID(ctypes.Structure):
@@ -93,7 +100,7 @@ class _MSG(ctypes.Structure):
 class _WNDCLASSW(ctypes.Structure):
     _fields_ = [
         ("style", wintypes.UINT),
-        ("lpfnWndProc", ctypes.c_void_p),
+        ("lpfnWndProc", _WNDPROC),
         ("cbClsExtra", ctypes.c_int),
         ("cbWndExtra", ctypes.c_int),
         ("hInstance", wintypes.HINSTANCE),
@@ -125,13 +132,94 @@ class _NOTIFYICONDATAW(ctypes.Structure):
     ]
 
 
-_WNDPROC = ctypes.WINFUNCTYPE(
-    _LRESULT,
-    wintypes.HWND,
-    wintypes.UINT,
-    wintypes.WPARAM,
-    wintypes.LPARAM,
-)
+def _configure_win32_signatures() -> None:
+    _kernel32.GetCurrentThreadId.argtypes = []
+    _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+    _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    _kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+    _kernel32.GetLastError.argtypes = []
+    _kernel32.GetLastError.restype = wintypes.DWORD
+
+    _user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    _user32.PostMessageW.restype = wintypes.BOOL
+
+    _user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    _user32.PostThreadMessageW.restype = wintypes.BOOL
+
+    _user32.GetMessageW.argtypes = [ctypes.POINTER(_MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+    _user32.GetMessageW.restype = wintypes.BOOL
+
+    _user32.TranslateMessage.argtypes = [ctypes.POINTER(_MSG)]
+    _user32.TranslateMessage.restype = wintypes.BOOL
+
+    _user32.DispatchMessageW.argtypes = [ctypes.POINTER(_MSG)]
+    _user32.DispatchMessageW.restype = _LRESULT
+
+    _user32.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASSW)]
+    _user32.RegisterClassW.restype = wintypes.ATOM
+
+    _user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.HMENU,
+        wintypes.HINSTANCE,
+        wintypes.LPVOID,
+    ]
+    _user32.CreateWindowExW.restype = wintypes.HWND
+
+    _user32.LoadImageW.argtypes = [
+        wintypes.HINSTANCE,
+        wintypes.LPCWSTR,
+        wintypes.UINT,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    _user32.LoadImageW.restype = wintypes.HANDLE
+
+    _user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+    _user32.LoadIconW.restype = wintypes.HICON
+
+    _user32.DestroyIcon.argtypes = [wintypes.HICON]
+    _user32.DestroyIcon.restype = wintypes.BOOL
+
+    _user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    _user32.PostQuitMessage.restype = None
+
+    _user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    _user32.DefWindowProcW.restype = _LRESULT
+
+    _shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(_NOTIFYICONDATAW)]
+    _shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+
+    _shell32.ExtractIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT]
+    _shell32.ExtractIconW.restype = wintypes.HICON
+
+
+def _last_error_code() -> int:
+    error_code = ctypes.get_last_error()
+    if error_code != 0:
+        return int(error_code)
+    return int(_kernel32.GetLastError())
+
+
+def _raise_last_windows_error(*, api_name: str) -> None:
+    error_code = _last_error_code()
+    if error_code != 0:
+        raise ctypes.WinError(error_code)
+    raise OSError(f"{api_name} failed without setting a Win32 last-error code.")
+
+
+_configure_win32_signatures()
 
 
 class WindowsTrayIcon:
@@ -214,14 +302,14 @@ class WindowsTrayIcon:
         hinstance = _kernel32.GetModuleHandleW(None)
 
         window_class = _WNDCLASSW()
-        window_class.lpfnWndProc = ctypes.cast(self._window_proc, ctypes.c_void_p).value
+        window_class.lpfnWndProc = self._window_proc
         window_class.hInstance = hinstance
         window_class.lpszClassName = _WINDOW_CLASS_NAME
         atom = _user32.RegisterClassW(ctypes.byref(window_class))
         if atom == 0:
-            error_code = ctypes.get_last_error()
+            error_code = _last_error_code()
             if error_code != 1410:
-                raise ctypes.WinError(error_code)
+                _raise_last_windows_error(api_name="RegisterClassW")
 
         hwnd = _user32.CreateWindowExW(
             0,
@@ -238,7 +326,7 @@ class WindowsTrayIcon:
             None,
         )
         if hwnd == 0:
-            raise ctypes.WinError(ctypes.get_last_error())
+            _raise_last_windows_error(api_name="CreateWindowExW")
 
         return hwnd
 
@@ -248,7 +336,7 @@ class WindowsTrayIcon:
 
         notify_data = self._build_notify_data(self._hwnd)
         if not _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(notify_data)):
-            raise ctypes.WinError(ctypes.get_last_error())
+            _raise_last_windows_error(api_name="Shell_NotifyIconW(NIM_ADD)")
 
         notify_data.uVersion = _NOTIFYICON_VERSION_4
         _shell32.Shell_NotifyIconW(_NIM_SETVERSION, ctypes.byref(notify_data))
