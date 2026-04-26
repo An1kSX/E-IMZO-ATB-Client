@@ -43,6 +43,13 @@ class PromptService(Protocol):
     ) -> str | None:
         ...
 
+    async def request_new_pfx_password(
+        self,
+        *,
+        command: ProxyCommand,
+    ) -> str | None:
+        ...
+
     async def resolve_port_conflict(
         self,
         *,
@@ -90,6 +97,20 @@ class TkPromptService:
                 account_name=account_name,
                 reason=reason,
                 error_message=error_message,
+            ),
+        )
+
+    async def request_new_pfx_password(
+        self,
+        *,
+        command: ProxyCommand,
+    ) -> str | None:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(
+                _show_new_pfx_password_dialog,
+                command_label=_format_command_label(command),
             ),
         )
 
@@ -152,6 +173,67 @@ def _schedule_input_focus(widget: object, *, select_all: bool = False) -> None:
         widget.after(80, _activate)
     except Exception:
         pass
+
+
+def _enable_entry_paste_support(entry_widget: object, *, tk_module: object) -> None:
+    def _paste_from_clipboard(event=None) -> str:
+        try:
+            clipboard_text = entry_widget.clipboard_get()
+        except Exception:
+            return "break"
+
+        if not clipboard_text:
+            return "break"
+
+        try:
+            entry_widget.delete("sel.first", "sel.last")
+        except Exception:
+            pass
+
+        try:
+            entry_widget.insert("insert", clipboard_text)
+        except Exception:
+            return "break"
+
+        return "break"
+
+    def _show_context_menu(event) -> str | None:
+        menu = None
+        try:
+            try:
+                entry_widget.focus_set()
+                entry_widget.icursor(f"@{event.x}")
+            except Exception:
+                pass
+
+            menu = tk_module.Menu(entry_widget, tearoff=False)
+            menu.add_command(label="Вставить", command=_paste_from_clipboard)
+            menu.tk_popup(event.x_root, event.y_root)
+            return "break"
+        except Exception:
+            return None
+        finally:
+            if menu is not None:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+
+    def _handle_control_key_press(event) -> str | None:
+        # In some keyboard layouts Ctrl+V does not trigger <Control-v>,
+        # but the same physical key keeps virtual-key code 86 on Windows.
+        if getattr(event, "keycode", None) == 86:
+            return _paste_from_clipboard(event)
+        return None
+
+    try:
+        entry_widget.bind("<Control-v>", _paste_from_clipboard, add="+")
+        entry_widget.bind("<Control-V>", _paste_from_clipboard, add="+")
+        entry_widget.bind("<Shift-Insert>", _paste_from_clipboard, add="+")
+        entry_widget.bind("<Control-KeyPress>", _handle_control_key_press, add="+")
+        entry_widget.bind("<Button-3>", _show_context_menu, add="+")
+    except Exception:
+        return
 
 
 def _show_confirmation_dialog(
@@ -271,6 +353,7 @@ def _show_manual_password_dialog(*, parent: object) -> str | None:
                 width=36,
             )
             password_entry.grid(row=3, column=0, sticky="we")
+            _enable_entry_paste_support(password_entry, tk_module=tk)
             _schedule_input_focus(password_entry)
             return password_entry
 
@@ -299,6 +382,143 @@ def _show_manual_password_dialog(*, parent: object) -> str | None:
 
     dialog = ManualPasswordDialog(parent)
     return dialog.result
+
+
+def _show_new_pfx_password_dialog(*, command_label: str) -> str | None:
+    import tkinter as tk
+    from tkinter import simpledialog
+    from tkinter import ttk
+
+    class NewPfxPasswordDialog(simpledialog.Dialog):
+        def __init__(self, parent: tk.Misc) -> None:
+            self._password_var = tk.StringVar()
+            self._confirmation_var = tk.StringVar()
+            self._validation_message_var = tk.StringVar(value="")
+            self.result = None
+            super().__init__(parent, title="Новый пароль PFX")
+
+        def body(self, master: tk.Misc) -> tk.Widget:
+            self.resizable(False, False)
+            self.attributes("-topmost", True)
+
+            container = ttk.Frame(master, padding=16)
+            container.grid(sticky="nsew")
+            container.columnconfigure(0, weight=1)
+
+            ttk.Label(
+                container,
+                text=f"Введите новый пароль для операции {command_label}.",
+                wraplength=380,
+                justify="left",
+            ).grid(row=0, column=0, sticky="w")
+            ttk.Label(
+                container,
+                text=(
+                    "Пароль должен содержать минимум 10 символов, только латинские буквы и цифры, "
+                    "минимум 2 маленькие буквы, 2 большие буквы и 1 цифру."
+                ),
+                wraplength=380,
+                justify="left",
+                padding=(0, 8, 0, 0),
+            ).grid(row=1, column=0, sticky="w")
+
+            validation_label = ttk.Label(
+                container,
+                textvariable=self._validation_message_var,
+                foreground="#b42318",
+                wraplength=380,
+                justify="left",
+                padding=(0, 8, 0, 0),
+            )
+            validation_label.grid(row=2, column=0, sticky="w")
+
+            ttk.Label(container, text="Новый пароль:", padding=(0, 12, 0, 0)).grid(
+                row=3,
+                column=0,
+                sticky="w",
+            )
+            password_entry = ttk.Entry(
+                container,
+                textvariable=self._password_var,
+                show="*",
+                width=40,
+            )
+            password_entry.grid(row=4, column=0, sticky="we")
+            _enable_entry_paste_support(password_entry, tk_module=tk)
+
+            ttk.Label(container, text="Подтверждение пароля:", padding=(0, 12, 0, 0)).grid(
+                row=5,
+                column=0,
+                sticky="w",
+            )
+            confirmation_entry = ttk.Entry(
+                container,
+                textvariable=self._confirmation_var,
+                show="*",
+                width=40,
+            )
+            confirmation_entry.grid(row=6, column=0, sticky="we")
+            _enable_entry_paste_support(confirmation_entry, tk_module=tk)
+
+            _schedule_input_focus(password_entry)
+            return password_entry
+
+        def buttonbox(self) -> None:
+            box = ttk.Frame(self, padding=(16, 0, 16, 16))
+            box.pack()
+
+            approve_button = ttk.Button(box, text="ОК", width=14, command=self.ok, default="active")
+            approve_button.grid(row=0, column=0, padx=(0, 8))
+            ttk.Button(box, text="Отменить", width=14, command=self.cancel).grid(row=0, column=1)
+
+            self.bind("<Return>", self.ok)
+            self.bind("<Escape>", self.cancel)
+
+        def validate(self) -> bool:
+            validation_message = _validate_new_pfx_password(
+                password=self._password_var.get(),
+                confirmation=self._confirmation_var.get(),
+            )
+            if validation_message is None:
+                return True
+
+            self._validation_message_var.set(validation_message)
+            self.bell()
+            return False
+
+        def apply(self) -> None:
+            self.result = self._password_var.get()
+
+    return _run_dialog(dialog_factory=NewPfxPasswordDialog)
+
+
+def _validate_new_pfx_password(*, password: str, confirmation: str) -> str | None:
+    if not password:
+        return "Введите новый пароль или нажмите «Отменить»."
+
+    if password != confirmation:
+        return "Пароль и подтверждение пароля не совпадают."
+
+    if len(password) < 10:
+        return "Пароль должен содержать минимум 10 символов."
+
+    if not password.isascii() or not password.isalnum():
+        return "Пароль должен содержать только латинские буквы и цифры."
+
+    lowercase_count = sum(1 for character in password if "a" <= character <= "z")
+    uppercase_count = sum(1 for character in password if "A" <= character <= "Z")
+    digit_count = sum(1 for character in password if character.isdigit())
+
+    if lowercase_count < 2:
+        return "Пароль должен содержать минимум 2 маленькие латинские буквы."
+
+    if uppercase_count < 2:
+        return "Пароль должен содержать минимум 2 большие латинские буквы."
+
+    if digit_count < 1:
+        return "Пароль должен содержать минимум 1 цифру."
+
+    return None
 
 
 def _show_password_dialog(
@@ -368,6 +588,7 @@ def _show_password_dialog(
                 width=36,
             )
             password_entry.grid(row=5, column=0, sticky="we")
+            _enable_entry_paste_support(password_entry, tk_module=tk)
             _schedule_input_focus(password_entry)
             return password_entry
 
@@ -545,6 +766,7 @@ def _show_api_base_url_dialog(
                 width=44,
             )
             url_entry.grid(row=4, column=0, sticky="we")
+            _enable_entry_paste_support(url_entry, tk_module=tk)
             _schedule_input_focus(url_entry, select_all=True)
             return url_entry
 

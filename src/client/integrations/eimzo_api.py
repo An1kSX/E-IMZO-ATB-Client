@@ -24,6 +24,8 @@ _TEXTUAL_CONTENT_TYPES = {
 }
 _PFX_PLUGIN_NAME = "pfx"
 _LOAD_KEY_COMMAND_NAME = "load_key"
+_PKI_PLUGIN_NAME = "pki"
+_ENROLL_PFX_STEP1_COMMAND_NAME = "enroll_pfx_step1"
 _PKCS7_PLUGIN_NAME = "pkcs7"
 _CREATE_PKCS7_COMMAND_NAME = "create_pkcs7"
 _APPEND_PKCS7_ATTACHED_COMMAND_NAME = "append_pkcs7_attached"
@@ -230,10 +232,22 @@ class EimzoApiClient:
                 )
                 return _cancelled_proxy_response()
 
+        new_pfx_password: str | None = None
+        if _command_requires_new_pfx_password(command):
+            new_pfx_password = await self._prompt_service.request_new_pfx_password(command=command)
+            if new_pfx_password is None:
+                LOGGER.info(
+                    "User cancelled new PFX password prompt for %s",
+                    command_label,
+                    extra=_USER_ACTION_LOG_EXTRA,
+                )
+                return _cancelled_proxy_response()
+
         request_arguments = _build_forward_request_arguments(
             command=command,
             arguments=prepared_request.arguments,
             manual_password=manual_password,
+            new_pfx_password=new_pfx_password,
         )
 
         try:
@@ -390,7 +404,7 @@ class EimzoApiClient:
     ) -> HttpProxyResponse:
         method = "GET"
         json_payload: Any = _MISSING
-        if command.has_arguments:
+        if command.has_arguments or _command_requires_new_pfx_password(command):
             method = "POST"
             json_payload = request_arguments
 
@@ -576,11 +590,37 @@ def _build_forward_request_arguments(
     command: ProxyCommand,
     arguments: Any,
     manual_password: str | None,
+    new_pfx_password: str | None,
 ) -> Any:
+    if _command_requires_new_pfx_password(command) and new_pfx_password is not None:
+        arguments = _append_new_pfx_password_argument(arguments=arguments, password=new_pfx_password)
+
     if _command_requires_arguments_password_body(command):
         return _build_arguments_password_body(arguments=arguments, password=manual_password)
 
     return _apply_manual_password_argument(arguments=arguments, manual_password=manual_password)
+
+
+def _command_requires_new_pfx_password(command: ProxyCommand) -> bool:
+    return (command.plugin, command.name) == (_PKI_PLUGIN_NAME, _ENROLL_PFX_STEP1_COMMAND_NAME)
+
+
+def _append_new_pfx_password_argument(*, arguments: Any, password: str) -> Any:
+    if isinstance(arguments, dict):
+        nested_arguments = arguments.get("arguments")
+        if not isinstance(nested_arguments, (list, tuple)):
+            return [arguments, password]
+        request_arguments = dict(arguments)
+        request_arguments["arguments"] = [*nested_arguments, password]
+        return request_arguments
+
+    if isinstance(arguments, (list, tuple)):
+        return [*arguments, password]
+
+    if arguments is None:
+        return [password]
+
+    return [arguments, password]
 
 
 def _command_requires_arguments_password_body(command: ProxyCommand) -> bool:

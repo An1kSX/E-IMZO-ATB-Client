@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import aiohttp
 
@@ -11,7 +12,9 @@ from client.system.account import resolve_account_name
 from client.system.autostart import disable_known_eimzo_autostart
 from client.system.certificates import maintain_localhost_certificate, resolve_server_certificate
 from client.system.eimzo_process import (
+    ListeningProcess,
     find_listening_process_by_port,
+    find_running_eimzo_processes,
     is_eimzo_process,
     is_port_in_use,
     terminate_related_eimzo_processes,
@@ -23,6 +26,7 @@ from client.ui.prompts import PromptService, TkPromptService
 
 LOGGER = logging.getLogger(__name__)
 _PORT_CONFLICT_LOGGER = logging.getLogger("client.port_conflict")
+_RUNTIME_EIMZO_MONITOR_INTERVAL_SECONDS = 5.0
 
 
 async def run_app(config: AppConfig) -> None:
@@ -81,27 +85,201 @@ async def run_app(config: AppConfig) -> None:
                 server_key_path=server_certificate.key_path,
                 certificate_rotation_event=certificate_rotation_event,
             )
-            while True:
-                try:
-                    await websocket_server.run_forever()
-                    return
-                except WebSocketPortInUseError as error:
-                    should_retry = await _resolve_port_conflict(
-                        config=config,
-                        prompt_service=prompt_service,
-                        conflict=error,
-                    )
-                    if not should_retry:
-                        LOGGER.info(
-                            "Startup was cancelled because WebSocket port %s is already in use.",
-                            error.port,
-                        )
+            runtime_monitor_stop_event = asyncio.Event()
+            runtime_monitor_task = asyncio.create_task(
+                _monitor_runtime_eimzo_port_conflicts(
+                    config=config,
+                    prompt_service=prompt_service,
+                    stop_event=runtime_monitor_stop_event,
+                ),
+                name="runtime-eimzo-port-monitor",
+            )
+            try:
+                while True:
+                    try:
+                        await websocket_server.run_forever()
                         return
+                    except WebSocketPortInUseError as error:
+                        should_retry = await _resolve_port_conflict(
+                            config=config,
+                            prompt_service=prompt_service,
+                            conflict=error,
+                        )
+                        if not should_retry:
+                            LOGGER.info(
+                                "Startup was cancelled because WebSocket port %s is already in use.",
+                                error.port,
+                            )
+                            return
+            finally:
+                runtime_monitor_stop_event.set()
+                runtime_monitor_task.cancel()
+                await asyncio.gather(runtime_monitor_task, return_exceptions=True)
     finally:
         prompt_service.close()
         if certificate_task is not None:
             certificate_task.cancel()
             await asyncio.gather(certificate_task, return_exceptions=True)
+
+
+async def _monitor_runtime_eimzo_port_conflicts(
+    *,
+    config: AppConfig,
+    prompt_service: PromptService,
+    stop_event: asyncio.Event,
+) -> None:
+    observed_eimzo_pids: set[int] = set()
+    runtime_conflict_muted = False
+    while not stop_event.is_set():
+        listening_process = find_listening_process_by_port(port=config.ws_port)
+        if listening_process is None or listening_process.pid != os.getpid():
+            observed_eimzo_pids.clear()
+            runtime_conflict_muted = False
+            await _wait_for_event_or_timeout(
+                stop_event=stop_event,
+                timeout_seconds=_RUNTIME_EIMZO_MONITOR_INTERVAL_SECONDS,
+            )
+            continue
+
+        running_eimzo_processes = find_running_eimzo_processes()
+        if not running_eimzo_processes:
+            observed_eimzo_pids.clear()
+            runtime_conflict_muted = False
+            await _wait_for_event_or_timeout(
+                stop_event=stop_event,
+                timeout_seconds=_RUNTIME_EIMZO_MONITOR_INTERVAL_SECONDS,
+            )
+            continue
+
+        current_eimzo_pids = {process.pid for process in running_eimzo_processes}
+        if not runtime_conflict_muted:
+            newly_detected_processes = [
+                process for process in running_eimzo_processes if process.pid not in observed_eimzo_pids
+            ]
+            if newly_detected_processes:
+                process = _select_preferred_runtime_conflict_process(newly_detected_processes)
+                _PORT_CONFLICT_LOGGER.warning(
+                    "Detected runtime E-IMZO process while this client owns the WebSocket port. "
+                    "process=%s ws_port=%s",
+                    process,
+                    config.ws_port,
+                )
+                runtime_conflict_resolved = await _resolve_runtime_eimzo_conflict(
+                    config=config,
+                    prompt_service=prompt_service,
+                    listening_process=process,
+                )
+                if stop_event.is_set():
+                    return
+                if not runtime_conflict_resolved:
+                    runtime_conflict_muted = True
+
+        observed_eimzo_pids = current_eimzo_pids
+        await _wait_for_event_or_timeout(
+            stop_event=stop_event,
+            timeout_seconds=_RUNTIME_EIMZO_MONITOR_INTERVAL_SECONDS,
+        )
+
+
+def _select_preferred_runtime_conflict_process(
+    processes: list[ListeningProcess],
+) -> ListeningProcess:
+    for process in processes:
+        if process.name.strip().casefold() == "e-imzo.exe":
+            return process
+    return processes[0]
+
+
+async def _resolve_runtime_eimzo_conflict(
+    *,
+    config: AppConfig,
+    prompt_service: PromptService,
+    listening_process: ListeningProcess,
+) -> bool:
+    while True:
+        resolution = await prompt_service.resolve_port_conflict(
+            process_name=listening_process.name,
+            port=config.ws_port,
+        )
+        _PORT_CONFLICT_LOGGER.info(
+            "Runtime E-IMZO conflict dialog resolved. process=%s terminate_process=%s remove_from_autostart=%s",
+            listening_process,
+            resolution.terminate_process,
+            resolution.remove_from_autostart,
+        )
+        if not resolution.terminate_process:
+            _PORT_CONFLICT_LOGGER.info(
+                "User dismissed runtime E-IMZO conflict flow. process=%s",
+                listening_process,
+            )
+            return False
+
+        if resolution.remove_from_autostart:
+            removed_autostart_entries = disable_known_eimzo_autostart()
+            _PORT_CONFLICT_LOGGER.info(
+                "Requested E-IMZO autostart removal from runtime flow. removed_entries=%s",
+                removed_autostart_entries,
+            )
+            if removed_autostart_entries == 0:
+                LOGGER.warning("Could not find E-IMZO auto-start entries to remove.")
+                show_info_message(
+                    title="Автозагрузка E-IMZO не найдена",
+                    message=(
+                        "Не удалось найти запись автозагрузки E-IMZO в стандартных местах Windows.\n\n"
+                        "Возможно, она настроена через другой механизм и её нужно отключить вручную."
+                    ),
+                )
+
+        stopped = terminate_related_eimzo_processes(listening_process=listening_process)
+        _PORT_CONFLICT_LOGGER.info(
+            "Runtime terminate_related_eimzo_processes finished. process=%s stopped=%s",
+            listening_process,
+            stopped,
+        )
+        if not stopped:
+            stopped = terminate_process_by_pid(pid=listening_process.pid)
+            _PORT_CONFLICT_LOGGER.info(
+                "Runtime direct terminate_process_by_pid fallback finished. pid=%s stopped=%s",
+                listening_process.pid,
+                stopped,
+            )
+
+        if stopped:
+            _PORT_CONFLICT_LOGGER.info(
+                "Runtime E-IMZO conflict flow succeeded. process=%s",
+                listening_process,
+            )
+            return True
+
+        show_info_message(
+            title="Не удалось закрыть E-IMZO",
+            message=(
+                f"Не удалось закрыть процесс {listening_process.name} (PID {listening_process.pid}).\n\n"
+                "Попробуйте закрыть E-IMZO вручную или повторите попытку."
+            ),
+        )
+        refreshed_process = _find_running_eimzo_process_by_pid(pid=listening_process.pid)
+        _PORT_CONFLICT_LOGGER.info(
+            "Refreshed runtime E-IMZO process after failed stop attempt. refreshed_process=%s",
+            refreshed_process,
+        )
+        if refreshed_process is None:
+            return False
+        listening_process = refreshed_process
+
+
+def _find_running_eimzo_process_by_pid(*, pid: int) -> ListeningProcess | None:
+    for process in find_running_eimzo_processes():
+        if process.pid == pid:
+            return process
+    return None
+
+
+async def _wait_for_event_or_timeout(*, stop_event: asyncio.Event, timeout_seconds: float) -> None:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        return
 
 
 async def _resolve_port_conflict(

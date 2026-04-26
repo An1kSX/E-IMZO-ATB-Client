@@ -73,6 +73,27 @@ def find_listening_process_by_port(*, port: int) -> ListeningProcess | None:
     return listening_process
 
 
+def find_running_eimzo_processes() -> list[ListeningProcess]:
+    if platform.system() != "Windows":
+        return []
+
+    result: list[ListeningProcess] = []
+    for process in _resolve_windows_process_snapshot():
+        if not is_eimzo_process(process):
+            continue
+        result.append(
+            ListeningProcess(
+                pid=process.pid,
+                name=process.name,
+                executable_path=process.executable_path,
+                command_line=process.command_line,
+            )
+        )
+
+    LOGGER.info("Resolved running E-IMZO process snapshot. process_count=%s", len(result))
+    return result
+
+
 def terminate_process_by_pid(*, pid: int) -> bool:
     if platform.system() != "Windows" or pid <= 0:
         return False
