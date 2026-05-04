@@ -129,12 +129,12 @@ async def _monitor_runtime_eimzo_port_conflicts(
     stop_event: asyncio.Event,
 ) -> None:
     observed_eimzo_pids: set[int] = set()
-    runtime_conflict_muted = False
+    runtime_conflict_dismissed = False
+    runtime_conflict_dismissed_logged_pids: set[int] = set()
     while not stop_event.is_set():
         listening_process = find_listening_process_by_port(port=config.ws_port)
         if listening_process is None or listening_process.pid != os.getpid():
             observed_eimzo_pids.clear()
-            runtime_conflict_muted = False
             await _wait_for_event_or_timeout(
                 stop_event=stop_event,
                 timeout_seconds=_RUNTIME_EIMZO_MONITOR_INTERVAL_SECONDS,
@@ -144,7 +144,7 @@ async def _monitor_runtime_eimzo_port_conflicts(
         running_eimzo_processes = find_running_eimzo_processes()
         if not running_eimzo_processes:
             observed_eimzo_pids.clear()
-            runtime_conflict_muted = False
+            runtime_conflict_dismissed_logged_pids.clear()
             await _wait_for_event_or_timeout(
                 stop_event=stop_event,
                 timeout_seconds=_RUNTIME_EIMZO_MONITOR_INTERVAL_SECONDS,
@@ -152,7 +152,17 @@ async def _monitor_runtime_eimzo_port_conflicts(
             continue
 
         current_eimzo_pids = {process.pid for process in running_eimzo_processes}
-        if not runtime_conflict_muted:
+        if runtime_conflict_dismissed:
+            new_logged_pids = current_eimzo_pids - runtime_conflict_dismissed_logged_pids
+            if new_logged_pids:
+                _PORT_CONFLICT_LOGGER.info(
+                    "Runtime E-IMZO conflict prompt is muted after user cancellation. "
+                    "processes=%s ws_port=%s",
+                    running_eimzo_processes,
+                    config.ws_port,
+                )
+                runtime_conflict_dismissed_logged_pids.update(current_eimzo_pids)
+        else:
             newly_detected_processes = [
                 process for process in running_eimzo_processes if process.pid not in observed_eimzo_pids
             ]
@@ -172,7 +182,8 @@ async def _monitor_runtime_eimzo_port_conflicts(
                 if stop_event.is_set():
                     return
                 if not runtime_conflict_resolved:
-                    runtime_conflict_muted = True
+                    runtime_conflict_dismissed = True
+                    runtime_conflict_dismissed_logged_pids.update(current_eimzo_pids)
 
         observed_eimzo_pids = current_eimzo_pids
         await _wait_for_event_or_timeout(

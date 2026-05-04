@@ -12,6 +12,7 @@ LOGGER = logging.getLogger(__name__)
 _EIMZO_PROCESS_NAME = "E-IMZO.exe"
 _EIMZO_INSTALL_DIR = r"c:\program files (x86)\e-imzo"
 _EIMZO_EXECUTABLE_PATH = r"C:\Program Files (x86)\E-IMZO\E-IMZO.exe"
+_PROCESS_LOG_TEXT_MAX_CHARS = 240
 _EIMZO_PROCESS_NAME_ALIASES = {
     _EIMZO_PROCESS_NAME.casefold(),
     "javaw.exe",
@@ -26,6 +27,15 @@ class ListeningProcess:
     executable_path: str | None = None
     command_line: str | None = None
 
+    def __repr__(self) -> str:
+        return _format_process_info_for_log(
+            type_name=self.__class__.__name__,
+            pid=self.pid,
+            name=self.name,
+            executable_path=self.executable_path,
+            command_line=self.command_line,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class WindowsProcessInfo:
@@ -33,6 +43,15 @@ class WindowsProcessInfo:
     name: str
     executable_path: str | None = None
     command_line: str | None = None
+
+    def __repr__(self) -> str:
+        return _format_process_info_for_log(
+            type_name=self.__class__.__name__,
+            pid=self.pid,
+            name=self.name,
+            executable_path=self.executable_path,
+            command_line=self.command_line,
+        )
 
 
 def is_port_in_use(*, port: int) -> bool:
@@ -99,8 +118,10 @@ def terminate_process_by_pid(*, pid: int) -> bool:
         return False
 
     if _stop_process_via_powershell(pid=pid):
-        LOGGER.info("Successfully terminated PID %s via Stop-Process.", pid)
-        return True
+        if not _is_process_running(pid=pid):
+            LOGGER.info("Successfully terminated PID %s via Stop-Process.", pid)
+            return True
+        LOGGER.warning("Stop-Process reported success for PID %s, but the process is still running.", pid)
 
     completed = subprocess.run(
         ["taskkill", "/PID", str(pid), "/T", "/F"],
@@ -110,7 +131,14 @@ def terminate_process_by_pid(*, pid: int) -> bool:
         creationflags=_windows_creation_flags(),
     )
     if completed.returncode == 0:
-        LOGGER.info("Successfully terminated PID %s via taskkill.", pid)
+        if not _is_process_running(pid=pid):
+            LOGGER.info("Successfully terminated PID %s via taskkill.", pid)
+            return True
+        LOGGER.warning("taskkill reported success for PID %s, but the process is still running.", pid)
+        return False
+
+    if not _is_process_running(pid=pid):
+        LOGGER.info("PID %s was no longer running after failed taskkill attempt.", pid)
         return True
 
     LOGGER.warning(
@@ -282,10 +310,63 @@ def _resolve_windows_process_name(*, pid: int) -> str | None:
 
 
 def _resolve_windows_process_snapshot() -> list[WindowsProcessInfo]:
-    command = (
-        "Get-Process | "
-        "Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress"
+    process_snapshot = _resolve_windows_process_snapshot_via_cim()
+    if process_snapshot is not None:
+        return process_snapshot
+
+    LOGGER.warning("Falling back to Get-Process snapshot without process command lines.")
+    process_snapshot = _resolve_windows_process_snapshot_via_get_process()
+    if process_snapshot is not None:
+        return process_snapshot
+
+    return []
+
+
+def _resolve_windows_process_snapshot_via_cim() -> list[WindowsProcessInfo] | None:
+    payload = _run_powershell_json_command(
+        command=(
+            "Get-CimInstance Win32_Process | "
+            "Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+        ),
+        log_label="Windows process tree via CIM",
     )
+    if payload is None:
+        return None
+
+    result = _build_process_snapshot_from_json_payload(
+        payload,
+        pid_key="ProcessId",
+        name_key="Name",
+        executable_path_key="ExecutablePath",
+        command_line_key="CommandLine",
+    )
+    LOGGER.info("Resolved Windows process snapshot via CIM. process_count=%s", len(result))
+    return result
+
+
+def _resolve_windows_process_snapshot_via_get_process() -> list[WindowsProcessInfo] | None:
+    payload = _run_powershell_json_command(
+        command=(
+            "Get-Process | "
+            "Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress"
+        ),
+        log_label="Windows process tree via Get-Process",
+    )
+    if payload is None:
+        return None
+
+    result = _build_process_snapshot_from_json_payload(
+        payload,
+        pid_key="Id",
+        name_key="ProcessName",
+        executable_path_key="Path",
+        command_line_key=None,
+    )
+    LOGGER.info("Resolved Windows process snapshot via Get-Process. process_count=%s", len(result))
+    return result
+
+
+def _run_powershell_json_command(*, command: str, log_label: str) -> object | None:
     completed = subprocess.run(
         ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
         check=False,
@@ -295,22 +376,32 @@ def _resolve_windows_process_snapshot() -> list[WindowsProcessInfo]:
     )
     if completed.returncode != 0:
         LOGGER.warning(
-            "Could not inspect Windows process tree. returncode=%s stderr=%s",
+            "Could not inspect %s. returncode=%s stderr=%s",
+            log_label,
             completed.returncode,
             (completed.stderr or "").strip(),
         )
-        return []
+        return None
 
     raw_output = (completed.stdout or "").strip()
     if not raw_output:
         return []
 
     try:
-        payload = json.loads(raw_output)
+        return json.loads(raw_output)
     except json.JSONDecodeError:
-        LOGGER.warning("Could not parse Windows process snapshot output.")
-        return []
+        LOGGER.warning("Could not parse %s output.", log_label)
+        return None
 
+
+def _build_process_snapshot_from_json_payload(
+    payload: object,
+    *,
+    pid_key: str,
+    name_key: str,
+    executable_path_key: str,
+    command_line_key: str | None,
+) -> list[WindowsProcessInfo]:
     if isinstance(payload, dict):
         payload = [payload]
     if not isinstance(payload, list):
@@ -320,9 +411,14 @@ def _resolve_windows_process_snapshot() -> list[WindowsProcessInfo]:
     for item in payload:
         if not isinstance(item, dict):
             continue
-        process_id = item.get("Id")
-        name = str(item.get("ProcessName") or "").strip()
-        executable_path = _normalize_optional_process_text(item.get("Path"))
+        process_id = item.get(pid_key)
+        name = str(item.get(name_key) or "").strip()
+        executable_path = _normalize_optional_process_text(item.get(executable_path_key))
+        command_line = (
+            _normalize_optional_process_text(item.get(command_line_key))
+            if command_line_key is not None
+            else None
+        )
         if not isinstance(process_id, int) or not name:
             continue
         result.append(
@@ -330,10 +426,10 @@ def _resolve_windows_process_snapshot() -> list[WindowsProcessInfo]:
                 pid=process_id,
                 name=_normalize_process_name(name),
                 executable_path=executable_path,
+                command_line=command_line,
             )
         )
 
-    LOGGER.info("Resolved Windows process snapshot. process_count=%s", len(result))
     return result
 
 
@@ -379,6 +475,35 @@ def _normalize_process_name(name: str) -> str:
     if normalized.lower().endswith(".exe"):
         return normalized
     return f"{normalized}.exe"
+
+
+def _format_process_info_for_log(
+    *,
+    type_name: str,
+    pid: int,
+    name: str,
+    executable_path: str | None,
+    command_line: str | None,
+) -> str:
+    parts = [
+        f"pid={pid!r}",
+        f"name={name!r}",
+    ]
+    if executable_path is not None:
+        parts.append(f"executable_path={_truncate_process_text_for_log(executable_path)!r}")
+    if command_line is not None:
+        parts.append(f"command_line={_truncate_process_text_for_log(command_line)!r}")
+    return f"{type_name}({', '.join(parts)})"
+
+
+def _truncate_process_text_for_log(text: str) -> str:
+    if len(text) <= _PROCESS_LOG_TEXT_MAX_CHARS:
+        return text
+    return f"{text[:_PROCESS_LOG_TEXT_MAX_CHARS]}..."
+
+
+def _is_process_running(*, pid: int) -> bool:
+    return _resolve_windows_process_name(pid=pid) is not None
 
 
 def _windows_creation_flags() -> int:

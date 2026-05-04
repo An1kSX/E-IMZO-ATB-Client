@@ -36,7 +36,17 @@ _AUTH_LOGIN_COMMAND_NAME = "login"
 _AUTH_INVALID_STATUS_CODES = {400, 401, 403}
 _ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 30.0
 _SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS = 2.0
+_LOG_ARGUMENT_VALUE_MAX_CHARS = 40
+_LOG_RESPONSE_BODY_MAX_CHARS = 1000
 _MISSING = object()
+_REDACTED_LOG_VALUE = "<redacted>"
+_SENSITIVE_LOG_KEY_PARTS = (
+    "authorization",
+    "jwt",
+    "password",
+    "secret",
+    "token",
+)
 _IDENTITY_ARGUMENT_KEY_ID_INDEXES: dict[tuple[str | None, str], int] = {
     (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME): 1,
     (_PKCS7_PLUGIN_NAME, _APPEND_PKCS7_ATTACHED_COMMAND_NAME): 1,
@@ -263,6 +273,12 @@ class EimzoApiClient:
                 request_arguments=request_arguments,
                 access_token=token,
             )
+            _log_forwarded_api_response(
+                command=command,
+                command_label=command_label,
+                request_arguments=request_arguments,
+                response=response,
+            )
 
             if response.status == 401:
                 LOGGER.info("Access token was rejected for %s. Requesting a new password.", command_label)
@@ -279,6 +295,12 @@ class EimzoApiClient:
                     endpoint_url=endpoint_url,
                     request_arguments=request_arguments,
                     access_token=token,
+                )
+                _log_forwarded_api_response(
+                    command=command,
+                    command_label=command_label,
+                    request_arguments=request_arguments,
+                    response=response,
                 )
 
             self._remember_key_identity(
@@ -687,9 +709,97 @@ def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
         text = body.decode("utf-8", errors="replace")
 
     text = " ".join(text.split())
-    if len(text) > 1000:
-        return f"{text[:1000]}..."
-    return text
+    return _truncate_text_for_log(text, max_chars=_LOG_RESPONSE_BODY_MAX_CHARS)
+
+
+def _log_forwarded_api_response(
+    *,
+    command: ProxyCommand,
+    command_label: str,
+    request_arguments: Any,
+    response: HttpProxyResponse,
+) -> None:
+    LOGGER.info(
+        "E-IMZO API server response. command=%s status=%s reason=%s arguments=%s body=%s",
+        command_label,
+        response.status,
+        response.reason,
+        _format_arguments_for_log(command=command, arguments=request_arguments),
+        _format_body_for_log(body=response.proxy_response.body, charset=response.proxy_response.charset),
+        extra=_USER_ACTION_LOG_EXTRA,
+    )
+
+
+def _format_arguments_for_log(*, command: ProxyCommand, arguments: Any) -> str:
+    safe_arguments = _redact_sensitive_request_arguments(command=command, arguments=arguments)
+    normalized_arguments = _normalize_payload_for_log(
+        safe_arguments,
+        max_string_chars=_LOG_ARGUMENT_VALUE_MAX_CHARS,
+    )
+    try:
+        return json.dumps(normalized_arguments, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return _truncate_text_for_log(str(normalized_arguments), max_chars=_LOG_ARGUMENT_VALUE_MAX_CHARS)
+
+
+def _redact_sensitive_request_arguments(*, command: ProxyCommand, arguments: Any) -> Any:
+    if not _command_requires_new_pfx_password(command):
+        return arguments
+
+    if isinstance(arguments, dict):
+        redacted_arguments = dict(arguments)
+        nested_arguments = redacted_arguments.get("arguments")
+        if isinstance(nested_arguments, (list, tuple)) and nested_arguments:
+            redacted_arguments["arguments"] = [
+                *nested_arguments[:-1],
+                _REDACTED_LOG_VALUE,
+            ]
+        return redacted_arguments
+
+    if isinstance(arguments, (list, tuple)) and arguments:
+        return [*arguments[:-1], _REDACTED_LOG_VALUE]
+
+    return arguments
+
+
+def _normalize_payload_for_log(value: Any, *, max_string_chars: int) -> Any:
+    if isinstance(value, dict):
+        return {
+            _truncate_text_for_log(str(key), max_chars=max_string_chars): (
+                _REDACTED_LOG_VALUE
+                if _is_sensitive_log_key(key)
+                else _normalize_payload_for_log(nested_value, max_string_chars=max_string_chars)
+            )
+            for key, nested_value in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [
+            _normalize_payload_for_log(item, max_string_chars=max_string_chars)
+            for item in value
+        ]
+
+    if isinstance(value, str):
+        return _truncate_text_for_log(value, max_chars=max_string_chars)
+
+    if isinstance(value, bytes):
+        return f"<{len(value)} bytes>"
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    return _truncate_text_for_log(str(value), max_chars=max_string_chars)
+
+
+def _is_sensitive_log_key(key: Any) -> bool:
+    normalized_key = str(key).strip().casefold()
+    return any(part in normalized_key for part in _SENSITIVE_LOG_KEY_PARTS)
+
+
+def _truncate_text_for_log(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}..."
 
 
 def _extract_identity_payload_from_load_key_command(command: ProxyCommand) -> _LoadKeyIdentityPayload | None:
