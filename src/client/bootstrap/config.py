@@ -216,7 +216,13 @@ def prompt_and_save_api_eimzo_url(
 
 
 def clear_saved_api_eimzo_url(*, runtime_dir: Path) -> None:
-    AppSettingsStore(runtime_dir).save(AppSettings())
+    settings_store = AppSettingsStore(runtime_dir)
+    settings = settings_store.load()
+    settings_store.save(
+        AppSettings(
+            duplicate_key_filter_enabled=settings.duplicate_key_filter_enabled,
+        )
+    )
     LOGGER.info("Cleared saved E-IMZO API URL from app settings.")
 
 
@@ -241,7 +247,12 @@ def _prompt_and_persist_api_eimzo_url(
             continue
 
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        settings_store.save(AppSettings(api_eimzo_url=normalized_url))
+        settings_store.save(
+            AppSettings(
+                api_eimzo_url=normalized_url,
+                duplicate_key_filter_enabled=settings.duplicate_key_filter_enabled,
+            )
+        )
         LOGGER.info("Saved E-IMZO API URL from UI input to app settings: %s", normalized_url)
         return normalized_url
 

@@ -17,6 +17,7 @@ from client.bootstrap.config import (
     prompt_and_save_api_eimzo_url,
 )
 from client.bootstrap.logging import configure_logging
+from client.bootstrap.settings import AppSettings, AppSettingsStore
 from client.bootstrap.ssl_hardening import (
     install_ssl_cert_store_fallback,
     is_windows_certificate_store_ssl_error,
@@ -122,7 +123,11 @@ async def _run_with_system_tray(config: AppConfig) -> None:
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
     launch_eimzo_after_shutdown = threading.Event()
+    settings_store = AppSettingsStore(config.runtime_dir)
+    settings = settings_store.load()
     duplicate_key_filter_enabled = threading.Event()
+    if settings.duplicate_key_filter_enabled:
+        duplicate_key_filter_enabled.set()
     tray_icon = WindowsTrayIcon(
         on_exit_request=lambda: loop.call_soon_threadsafe(shutdown_event.set),
         on_exit_and_launch_eimzo_request=lambda: _request_exit_and_launch_eimzo(
@@ -135,6 +140,7 @@ async def _run_with_system_tray(config: AppConfig) -> None:
         duplicate_key_filter_enabled=duplicate_key_filter_enabled.is_set,
         on_duplicate_key_filter_change=lambda enabled: _set_duplicate_key_filter_enabled(
             duplicate_key_filter_enabled,
+            settings_store=settings_store,
             enabled=enabled,
         ),
         icon_path=resolve_app_icon_path(),
@@ -295,11 +301,26 @@ def _force_process_exit(code: int) -> None:
     os._exit(code)
 
 
-def _set_duplicate_key_filter_enabled(state: threading.Event, *, enabled: bool) -> None:
+def _set_duplicate_key_filter_enabled(
+    state: threading.Event,
+    *,
+    settings_store: AppSettingsStore,
+    enabled: bool,
+) -> None:
     if enabled:
         state.set()
     else:
         state.clear()
+    settings = settings_store.load()
+    try:
+        settings_store.save(
+            AppSettings(
+                api_eimzo_url=settings.api_eimzo_url,
+                duplicate_key_filter_enabled=enabled,
+            )
+        )
+    except OSError:
+        logging.getLogger(__name__).exception("Could not save duplicate certificate key filter setting.")
     logging.getLogger(__name__).info(
         "Duplicate certificate key filtering %s from tray menu.",
         "enabled" if enabled else "disabled",

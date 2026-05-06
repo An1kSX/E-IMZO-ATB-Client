@@ -11,6 +11,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     api_eimzo_url: str | None = None
+    duplicate_key_filter_enabled: bool = False
 
 
 class AppSettingsStore:
@@ -36,11 +37,22 @@ class AppSettingsStore:
             LOGGER.warning("Ignoring invalid api_eimzo_url value in %s", self._settings_path)
             api_eimzo_url = None
 
-        return AppSettings(api_eimzo_url=api_eimzo_url)
+        duplicate_key_filter_enabled = payload.get("duplicate_key_filter_enabled", False)
+        if not isinstance(duplicate_key_filter_enabled, bool):
+            LOGGER.warning("Ignoring invalid duplicate_key_filter_enabled value in %s", self._settings_path)
+            duplicate_key_filter_enabled = False
+
+        return AppSettings(
+            api_eimzo_url=api_eimzo_url,
+            duplicate_key_filter_enabled=duplicate_key_filter_enabled,
+        )
 
     def save(self, settings: AppSettings) -> None:
         self._settings_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"api_eimzo_url": settings.api_eimzo_url}
+        payload = {
+            "api_eimzo_url": settings.api_eimzo_url,
+            "duplicate_key_filter_enabled": settings.duplicate_key_filter_enabled,
+        }
         self._settings_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
