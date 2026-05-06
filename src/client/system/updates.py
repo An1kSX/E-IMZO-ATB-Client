@@ -33,7 +33,7 @@ _DEFAULT_GITHUB_API = "https://api.github.com"
 _DEFAULT_RELEASE_REPO = "An1kSX/E-IMZO-ATB-Client"
 _USER_AGENT = "eimzo-atb-client-updater"
 _FAILED_UPDATE_RETRY_COOLDOWN_SECONDS = 1800.0
-_UPDATER_START_TIMEOUT_SECONDS = 5.0
+_UPDATER_START_TIMEOUT_SECONDS = 30.0
 _UPDATER_START_POLL_INTERVAL_SECONDS = 0.1
 _PYINSTALLER_ENV_VARS_TO_CLEAR = (
     "_MEIPASS2",
@@ -88,6 +88,13 @@ def maybe_start_self_update_from_github_release_with_notification(
     if _clear_update_state_if_applied(state_file_path=state_file_path):
         LOGGER.info("Cleared pending auto-update state after successful version change.")
 
+    if _should_skip_recent_pending_update_attempt(
+        state_file_path=state_file_path,
+        current_version=__version__,
+    ):
+        LOGGER.warning("Skipping auto-update check because a recent install attempt is still cooling down.")
+        return False
+
     release = _fetch_latest_release(
         repo=_DEFAULT_RELEASE_REPO,
         asset_name=config.auto_update_asset_name,
@@ -135,7 +142,7 @@ def maybe_start_self_update_from_github_release_with_notification(
         return False
 
     downloaded_file = updates_dir / f"{config.auto_update_asset_name}.new"
-    updater_script = updates_dir / "apply-update.cmd"
+    updater_script = updates_dir / "apply-update.ps1"
     updater_log_file = updates_dir / "apply-update.log"
     updater_start_marker = updates_dir / "apply-update.started"
     LOGGER.info(
@@ -197,6 +204,14 @@ def maybe_start_self_update_from_github_release_with_notification(
         except Exception:
             LOGGER.exception("Could not show auto-update notification for release %s.", release.tag_name)
 
+    try:
+        _save_update_state(
+            state_file_path=state_file_path,
+            state=UpdateState(target_version=release.tag_name, started_at=time.time()),
+        )
+    except OSError as error:
+        LOGGER.warning("Could not persist auto-update state to %s: %s", state_file_path, error)
+
     if not _start_updater_script(
         updater_script,
         updater_start_marker,
@@ -207,14 +222,6 @@ def maybe_start_self_update_from_github_release_with_notification(
     ):
         LOGGER.error("Auto-update aborted because updater script could not be started.")
         return False
-
-    try:
-        _save_update_state(
-            state_file_path=state_file_path,
-            state=UpdateState(target_version=release.tag_name, started_at=time.time()),
-        )
-    except OSError as error:
-        LOGGER.warning("Could not persist auto-update state to %s: %s", state_file_path, error)
 
     LOGGER.info(
         "Started self-update to %s from GitHub release. Current version=%s target=%s",
@@ -485,6 +492,21 @@ def _should_skip_repeated_failed_update_attempt(
     return (time.time() - state.started_at) < _FAILED_UPDATE_RETRY_COOLDOWN_SECONDS
 
 
+def _should_skip_recent_pending_update_attempt(
+    *,
+    state_file_path: Path,
+    current_version: str,
+) -> bool:
+    state = _load_update_state(state_file_path=state_file_path)
+    if state is None:
+        return False
+
+    if not _is_newer_version(candidate=state.target_version, current=current_version):
+        return False
+
+    return (time.time() - state.started_at) < _FAILED_UPDATE_RETRY_COOLDOWN_SECONDS
+
+
 def _write_updater_script(
     *,
     script_path: Path,
@@ -495,81 +517,94 @@ def _write_updater_script(
     start_marker_path: Path,
 ) -> None:
     script_contents = (
-        "@echo off\n"
-        "setlocal EnableExtensions EnableDelayedExpansion\n"
-        "set \"TargetPid=%~1\"\n"
-        "set \"SourcePath=%~2\"\n"
-        "set \"TargetPath=%~3\"\n"
-        "set \"LogPath=%~4\"\n"
-        "set \"StartMarkerPath=%~5\"\n"
-        "set \"CopySucceeded=0\"\n"
-        "\n"
-        "> \"%StartMarkerPath%\" echo started\n"
-        "call :WriteUpdateLog Updater script started. targetPid=%TargetPid% source=%SourcePath% target=%TargetPath%\n"
-        "\n"
-        "for /L %%I in (0,1,119) do (\n"
-        "    tasklist /FI \"PID eq %TargetPid%\" 2>NUL | findstr /R /C:\"\\<%TargetPid%\\>\" >NUL\n"
-        "    if errorlevel 1 (\n"
-        "        call :WriteUpdateLog Target process is no longer running.\n"
-        "        goto AfterWait\n"
-        "    )\n"
-        "    call :WriteUpdateLog Waiting for target process to exit. attempt=%%I\n"
-        "    timeout /t 1 /nobreak >NUL\n"
+        "param(\n"
+        "    [Parameter(Mandatory=$true)][int]$TargetPid,\n"
+        "    [Parameter(Mandatory=$true)][string]$SourcePath,\n"
+        "    [Parameter(Mandatory=$true)][string]$TargetPath,\n"
+        "    [Parameter(Mandatory=$true)][string]$LogPath,\n"
+        "    [Parameter(Mandatory=$true)][string]$StartMarkerPath\n"
         ")\n"
         "\n"
-        ":AfterWait\n"
-        "for /L %%I in (0,1,39) do (\n"
-        "    copy /Y \"%SourcePath%\" \"%TargetPath%\" >NUL 2>&1\n"
-        "    if not errorlevel 1 (\n"
-        "        set \"CopySucceeded=1\"\n"
-        "        call :WriteUpdateLog Copied update payload successfully. attempt=%%I\n"
-        "        goto AfterCopy\n"
-        "    )\n"
-        "    call :WriteUpdateLog Copy attempt failed. attempt=%%I error=!errorlevel!\n"
-        "    timeout /t 1 /nobreak >NUL\n"
-        ")\n"
+        "$ErrorActionPreference = 'Continue'\n"
+        "$CopySucceeded = $false\n"
         "\n"
-        ":AfterCopy\n"
-        "if not \"%CopySucceeded%\"==\"1\" (\n"
-        "    call :WriteUpdateLog Copy never succeeded; target executable was not replaced.\n"
-        "    goto Finish\n"
-        ")\n"
+        "function Write-UpdateLog {\n"
+        "    param([Parameter(Mandatory=$true)][string]$Message)\n"
+        "    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'\n"
+        "    Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value \"[$timestamp] [UPDATER] $Message\"\n"
+        "}\n"
         "\n"
-        "set \"_MEIPASS2=\"\n"
-        "set \"_PYI_APPLICATION_HOME_DIR=\"\n"
-        "set \"_PYI_PARENT_PROCESS_LEVEL=\"\n"
-        "set \"_PYI_SPLASH_IPC=\"\n"
-        "set \"PYINSTALLER_RESET_ENVIRONMENT=1\"\n"
-        "call :WriteUpdateLog Cleared PyInstaller bootstrap environment variables before launching the updated executable.\n"
-        "tasklist /FI \"PID eq %TargetPid%\" 2>NUL | findstr /R /C:\"\\<%TargetPid%\\>\" >NUL\n"
-        "if not errorlevel 1 (\n"
-        "    call :WriteUpdateLog Target process is still running; skipping launch to avoid duplicate instances.\n"
-        "    goto Finish\n"
-        ")\n"
-        "start \"\" \"%TargetPath%\" >NUL 2>&1\n"
-        "if errorlevel 1 (\n"
-        "    call :WriteUpdateLog Failed to start updated executable. error=%errorlevel%\n"
-        ") else (\n"
-        "    call :WriteUpdateLog Started updated executable successfully.\n"
-        ")\n"
+        "try {\n"
+        "    $logDirectory = Split-Path -Parent $LogPath\n"
+        "    if ($logDirectory) {\n"
+        "        New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null\n"
+        "    }\n"
+        "    Set-Content -LiteralPath $StartMarkerPath -Encoding ASCII -Value 'started'\n"
+        "    Write-UpdateLog \"Updater script started. targetPid=$TargetPid source=$SourcePath target=$TargetPath\"\n"
+        "} catch {\n"
+        "    try { Write-UpdateLog \"Failed to initialize updater. error=$($_.Exception.Message)\" } catch {}\n"
+        "    exit 2\n"
+        "}\n"
         "\n"
-        "del /F /Q \"%SourcePath%\" >NUL 2>&1\n"
-        "if errorlevel 1 (\n"
-        "    call :WriteUpdateLog Failed to remove temporary update payload. error=%errorlevel%\n"
-        ") else (\n"
-        "    call :WriteUpdateLog Removed temporary update payload.\n"
-        ")\n"
+        "for ($attempt = 0; $attempt -lt 120; $attempt++) {\n"
+        "    $targetProcess = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue\n"
+        "    if ($null -eq $targetProcess) {\n"
+        "        Write-UpdateLog 'Target process is no longer running.'\n"
+        "        break\n"
+        "    }\n"
+        "    Write-UpdateLog \"Waiting for target process to exit. attempt=$attempt\"\n"
+        "    Start-Sleep -Seconds 1\n"
+        "}\n"
         "\n"
-        ":Finish\n"
-        "call :WriteUpdateLog Updater script finished.\n"
-        "start \"\" /B cmd /C del /F /Q \"%~f0\" >NUL 2>&1\n"
-        "exit /b 0\n"
+        "for ($attempt = 0; $attempt -lt 40; $attempt++) {\n"
+        "    try {\n"
+        "        Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force -ErrorAction Stop\n"
+        "        $CopySucceeded = $true\n"
+        "        Write-UpdateLog \"Copied update payload successfully. attempt=$attempt\"\n"
+        "        break\n"
+        "    } catch {\n"
+        "        Write-UpdateLog \"Copy attempt failed. attempt=$attempt error=$($_.Exception.Message)\"\n"
+        "        Start-Sleep -Seconds 1\n"
+        "    }\n"
+        "}\n"
         "\n"
-        ":WriteUpdateLog\n"
-        ">> \"%LogPath%\" echo [%date% %time%] [UPDATER] %*\n"
-        "exit /b 0\n"
+        "if (-not $CopySucceeded) {\n"
+        "    Write-UpdateLog 'Copy never succeeded; target executable was not replaced.'\n"
+        "    Write-UpdateLog 'Updater script finished.'\n"
+        "    exit 0\n"
+        "}\n"
+        "\n"
+        "foreach ($name in @('_MEIPASS2', '_PYI_APPLICATION_HOME_DIR', '_PYI_PARENT_PROCESS_LEVEL', '_PYI_SPLASH_IPC')) {\n"
+        "    Remove-Item -Path \"Env:$name\" -ErrorAction SilentlyContinue\n"
+        "}\n"
+        "$env:PYINSTALLER_RESET_ENVIRONMENT = '1'\n"
+        "Write-UpdateLog 'Cleared PyInstaller bootstrap environment variables before launching the updated executable.'\n"
+        "\n"
+        "$targetProcess = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue\n"
+        "if ($null -ne $targetProcess) {\n"
+        "    Write-UpdateLog 'Target process is still running; skipping launch to avoid duplicate instances.'\n"
+        "} else {\n"
+        "    try {\n"
+        "        $workingDirectory = Split-Path -Parent $TargetPath\n"
+        "        Start-Process -FilePath $TargetPath -WorkingDirectory $workingDirectory -ErrorAction Stop\n"
+        "        Write-UpdateLog 'Started updated executable successfully.'\n"
+        "    } catch {\n"
+        "        Write-UpdateLog \"Failed to start updated executable. error=$($_.Exception.Message)\"\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "try {\n"
+        "    Remove-Item -LiteralPath $SourcePath -Force -ErrorAction Stop\n"
+        "    Write-UpdateLog 'Removed temporary update payload.'\n"
+        "} catch {\n"
+        "    Write-UpdateLog \"Failed to remove temporary update payload. error=$($_.Exception.Message)\"\n"
+        "}\n"
+        "\n"
+        "Write-UpdateLog 'Updater script finished.'\n"
+        "try { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}\n"
+        "exit 0\n"
     )
-    script_path.write_text(script_contents, encoding="utf-8")
+    script_path.write_text(script_contents, encoding="utf-8-sig")
     LOGGER.info(
         "Wrote updater script to %s. targetPid=%s source=%s target=%s log=%s marker=%s",
         script_path,
@@ -595,18 +630,29 @@ def _start_updater_script(
     try:
         process = subprocess.Popen(
             [
-                "cmd.exe",
-                "/c",
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
                 str(script_path),
+                "-TargetPid",
                 str(target_pid),
+                "-SourcePath",
                 str(source_path),
+                "-TargetPath",
                 str(target_path),
+                "-LogPath",
                 str(log_path),
+                "-StartMarkerPath",
                 str(start_marker_path),
             ],
             creationflags=creation_flags,
             close_fds=True,
             env=_build_updater_subprocess_env(),
+            stdin=subprocess.DEVNULL,
         )
     except OSError as error:
         LOGGER.error("Could not start updater script %s: %s", script_path, error)
@@ -621,20 +667,38 @@ def _start_updater_script(
 
         if process.poll() is not None:
             LOGGER.error(
-                "Updater script process exited before creating startup marker. exit_code=%s script=%s",
+                "Updater script process exited before creating startup marker. exit_code=%s script=%s log_tail=%s",
                 process.returncode,
                 script_path,
+                _read_log_tail_for_log(log_path),
             )
             return False
 
         time.sleep(_UPDATER_START_POLL_INTERVAL_SECONDS)
 
     LOGGER.error(
-        "Updater script did not create startup marker within %.1f seconds: %s",
+        "Updater script did not create startup marker within %.1f seconds: %s log_tail=%s",
         _UPDATER_START_TIMEOUT_SECONDS,
         start_marker_path,
+        _read_log_tail_for_log(log_path),
     )
     return False
+
+
+def _read_log_tail_for_log(log_path: Path, *, max_chars: int = 1000) -> str:
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "<missing>"
+    except OSError as error:
+        return f"<unavailable: {error}>"
+
+    text = " ".join(text.split())
+    if not text:
+        return "<empty>"
+    if len(text) > max_chars:
+        return f"...{text[-max_chars:]}"
+    return text
 
 
 def _build_updater_subprocess_env() -> dict[str, str]:

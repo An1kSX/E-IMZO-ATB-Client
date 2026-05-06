@@ -37,7 +37,9 @@ _AUTH_INVALID_STATUS_CODES = {400, 401, 403}
 _ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 30.0
 _SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS = 2.0
 _LOG_ARGUMENT_VALUE_MAX_CHARS = 40
+_LOG_BODY_VALUE_MAX_CHARS = 40
 _LOG_RESPONSE_BODY_MAX_CHARS = 1000
+_LOG_BODY_COLLECTION_MAX_ITEMS = 10
 _MISSING = object()
 _REDACTED_LOG_VALUE = "<redacted>"
 _SENSITIVE_LOG_KEY_PARTS = (
@@ -708,6 +710,23 @@ def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
     except UnicodeDecodeError:
         text = body.decode("utf-8", errors="replace")
 
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = _MISSING
+
+    if payload is not _MISSING:
+        normalized_payload = _normalize_payload_for_log(
+            payload,
+            max_string_chars=_LOG_BODY_VALUE_MAX_CHARS,
+            max_collection_items=_LOG_BODY_COLLECTION_MAX_ITEMS,
+        )
+        try:
+            formatted_payload = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            formatted_payload = str(normalized_payload)
+        return _truncate_text_for_log(formatted_payload, max_chars=_LOG_RESPONSE_BODY_MAX_CHARS)
+
     text = " ".join(text.split())
     return _truncate_text_for_log(text, max_chars=_LOG_RESPONSE_BODY_MAX_CHARS)
 
@@ -735,6 +754,7 @@ def _format_arguments_for_log(*, command: ProxyCommand, arguments: Any) -> str:
     normalized_arguments = _normalize_payload_for_log(
         safe_arguments,
         max_string_chars=_LOG_ARGUMENT_VALUE_MAX_CHARS,
+        max_collection_items=None,
     )
     try:
         return json.dumps(normalized_arguments, ensure_ascii=False, separators=(",", ":"))
@@ -762,22 +782,44 @@ def _redact_sensitive_request_arguments(*, command: ProxyCommand, arguments: Any
     return arguments
 
 
-def _normalize_payload_for_log(value: Any, *, max_string_chars: int) -> Any:
+def _normalize_payload_for_log(
+    value: Any,
+    *,
+    max_string_chars: int,
+    max_collection_items: int | None,
+) -> Any:
     if isinstance(value, dict):
         return {
             _truncate_text_for_log(str(key), max_chars=max_string_chars): (
                 _REDACTED_LOG_VALUE
                 if _is_sensitive_log_key(key)
-                else _normalize_payload_for_log(nested_value, max_string_chars=max_string_chars)
+                else _normalize_payload_for_log(
+                    nested_value,
+                    max_string_chars=max_string_chars,
+                    max_collection_items=max_collection_items,
+                )
             )
             for key, nested_value in value.items()
         }
 
     if isinstance(value, (list, tuple)):
-        return [
-            _normalize_payload_for_log(item, max_string_chars=max_string_chars)
-            for item in value
+        items = list(value)
+        omitted_count = 0
+        if max_collection_items is not None and len(items) > max_collection_items:
+            omitted_count = len(items) - max_collection_items
+            items = items[:max_collection_items]
+
+        normalized_items = [
+            _normalize_payload_for_log(
+                item,
+                max_string_chars=max_string_chars,
+                max_collection_items=max_collection_items,
+            )
+            for item in items
         ]
+        if omitted_count:
+            normalized_items.append(f"<{omitted_count} more items>")
+        return normalized_items
 
     if isinstance(value, str):
         return _truncate_text_for_log(value, max_chars=max_string_chars)
