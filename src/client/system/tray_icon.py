@@ -46,6 +46,7 @@ _CONFIGURE_API_URL_MENU_ITEM_ID = 1001
 _RESET_API_URL_MENU_ITEM_ID = 1002
 _EXIT_AND_LAUNCH_EIMZO_MENU_ITEM_ID = 1003
 _EXIT_MENU_ITEM_ID = 1004
+_DUPLICATE_KEY_FILTER_MENU_TEXT = "Фильтровать дубли ключей"
 _CONFIGURE_API_URL_MENU_TEXT = "Настроить URL E-IMZO API..."
 _RESET_API_URL_MENU_TEXT = "Сбросить сохраненный URL"
 _EXIT_MENU_TEXT = "Выход"
@@ -230,12 +231,16 @@ class WindowsTrayIcon:
         on_exit_and_launch_eimzo_request: Callable[[], None] | None = None,
         on_configure_api_url_request: Callable[[], None] | None = None,
         on_reset_api_url_request: Callable[[], None] | None = None,
+        duplicate_key_filter_enabled: Callable[[], bool] | None = None,
+        on_duplicate_key_filter_change: Callable[[bool], None] | None = None,
         icon_path: Path | None = None,
     ) -> None:
         self._on_exit_request = on_exit_request
         self._on_exit_and_launch_eimzo_request = on_exit_and_launch_eimzo_request
         self._on_configure_api_url_request = on_configure_api_url_request
         self._on_reset_api_url_request = on_reset_api_url_request
+        self._duplicate_key_filter_enabled = duplicate_key_filter_enabled
+        self._on_duplicate_key_filter_change = on_duplicate_key_filter_change
         self._icon_path = icon_path
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
@@ -473,6 +478,8 @@ class WindowsTrayIcon:
                 show_exit_and_launch_eimzo=self._on_exit_and_launch_eimzo_request is not None,
                 show_configure_api_url=self._on_configure_api_url_request is not None,
                 show_reset_api_url=self._on_reset_api_url_request is not None,
+                duplicate_key_filter_enabled=self._duplicate_key_filter_enabled,
+                on_duplicate_key_filter_change=self._on_duplicate_key_filter_change,
             )
             if selected_command:
                 self._handle_menu_command(hwnd, selected_command)
@@ -572,6 +579,8 @@ def _show_tray_menu_dialog(
     show_exit_and_launch_eimzo: bool,
     show_configure_api_url: bool,
     show_reset_api_url: bool,
+    duplicate_key_filter_enabled: Callable[[], bool] | None,
+    on_duplicate_key_filter_change: Callable[[bool], None] | None,
 ) -> int | None:
     import tkinter as tk
     from tkinter import ttk
@@ -598,10 +607,27 @@ def _show_tray_menu_dialog(
 
     row_index = 1
 
+    def _is_duplicate_key_filter_enabled() -> bool:
+        if duplicate_key_filter_enabled is None:
+            return False
+        try:
+            return bool(duplicate_key_filter_enabled())
+        except Exception:
+            LOGGER.exception("Could not read duplicate key filter state for tray menu.")
+            return False
+
     def choose(command_id: int) -> None:
         nonlocal selected_command
         selected_command = command_id
         _close_dialog()
+
+    def toggle_duplicate_key_filter() -> None:
+        if on_duplicate_key_filter_change is None:
+            return
+        try:
+            on_duplicate_key_filter_change(bool(duplicate_key_filter_var.get()))
+        except Exception:
+            LOGGER.exception("Could not change duplicate key filter state from tray menu.")
 
     def _close_dialog() -> None:
         try:
@@ -611,6 +637,15 @@ def _show_tray_menu_dialog(
         if dialog.winfo_exists():
             dialog.withdraw()
             dialog.destroy()
+
+    duplicate_key_filter_var = tk.BooleanVar(value=_is_duplicate_key_filter_enabled())
+    ttk.Checkbutton(
+        container,
+        text=_DUPLICATE_KEY_FILTER_MENU_TEXT,
+        variable=duplicate_key_filter_var,
+        command=toggle_duplicate_key_filter,
+    ).grid(row=row_index, column=0, sticky="w", pady=(12, 0))
+    row_index += 1
 
     if show_configure_api_url:
         ttk.Button(

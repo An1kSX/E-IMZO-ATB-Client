@@ -38,18 +38,25 @@ if TYPE_CHECKING:
 _TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
-def _load_run_app() -> "Callable[[AppConfig], Awaitable[None]]":
+def _load_run_app() -> "Callable[..., Awaitable[None]]":
     from client.app import run_app as imported_run_app
 
     return imported_run_app
 
 
-async def _run_app_entrypoint(config: AppConfig) -> None:
+async def _run_app_entrypoint(
+    config: AppConfig,
+    *,
+    duplicate_key_filter_enabled: "Callable[[], bool] | None" = None,
+) -> None:
     imported_run_app = _load_run_app()
-    await imported_run_app(config)
+    await imported_run_app(
+        config,
+        duplicate_key_filter_enabled=duplicate_key_filter_enabled,
+    )
 
 
-run_app: "Callable[[AppConfig], Awaitable[None]]" = _run_app_entrypoint
+run_app: "Callable[..., Awaitable[None]]" = _run_app_entrypoint
 
 
 def main() -> None:
@@ -115,6 +122,7 @@ async def _run_with_system_tray(config: AppConfig) -> None:
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
     launch_eimzo_after_shutdown = threading.Event()
+    duplicate_key_filter_enabled = threading.Event()
     tray_icon = WindowsTrayIcon(
         on_exit_request=lambda: loop.call_soon_threadsafe(shutdown_event.set),
         on_exit_and_launch_eimzo_request=lambda: _request_exit_and_launch_eimzo(
@@ -124,9 +132,20 @@ async def _run_with_system_tray(config: AppConfig) -> None:
         ),
         on_configure_api_url_request=lambda: _configure_saved_api_url(config.runtime_dir),
         on_reset_api_url_request=lambda: _reset_saved_api_url(config.runtime_dir),
+        duplicate_key_filter_enabled=duplicate_key_filter_enabled.is_set,
+        on_duplicate_key_filter_change=lambda enabled: _set_duplicate_key_filter_enabled(
+            duplicate_key_filter_enabled,
+            enabled=enabled,
+        ),
         icon_path=resolve_app_icon_path(),
     )
-    app_task = asyncio.create_task(run_app(config), name="run-app")
+    app_task = asyncio.create_task(
+        run_app(
+            config,
+            duplicate_key_filter_enabled=duplicate_key_filter_enabled.is_set,
+        ),
+        name="run-app",
+    )
     shutdown_task = asyncio.create_task(shutdown_event.wait(), name="wait-for-tray-exit")
     auto_update_task = asyncio.create_task(
         _run_periodic_auto_update_checks(config, shutdown_event),
@@ -274,6 +293,18 @@ def _install_windows_event_loop() -> None:
 
 def _force_process_exit(code: int) -> None:
     os._exit(code)
+
+
+def _set_duplicate_key_filter_enabled(state: threading.Event, *, enabled: bool) -> None:
+    if enabled:
+        state.set()
+    else:
+        state.clear()
+    logging.getLogger(__name__).info(
+        "Duplicate certificate key filtering %s from tray menu.",
+        "enabled" if enabled else "disabled",
+        extra={"user_action": True},
+    )
 
 
 def _request_exit_and_launch_eimzo(

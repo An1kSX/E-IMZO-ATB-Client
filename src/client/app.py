@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import Callable
 
 import aiohttp
 
@@ -29,7 +30,11 @@ _PORT_CONFLICT_LOGGER = logging.getLogger("client.port_conflict")
 _RUNTIME_EIMZO_MONITOR_INTERVAL_SECONDS = 5.0
 
 
-async def run_app(config: AppConfig) -> None:
+async def run_app(
+    config: AppConfig,
+    *,
+    duplicate_key_filter_enabled: Callable[[], bool] | None = None,
+) -> None:
     account_name = resolve_account_name(config.account_name_override)
     timeout = aiohttp.ClientTimeout(total=config.http_timeout_seconds)
     server_certificate = resolve_server_certificate(config)
@@ -69,6 +74,7 @@ async def run_app(config: AppConfig) -> None:
                 api_ca_cert_path=config.api_eimzo_ca_cert_path,
                 send_account_header=config.api_eimzo_send_account_header,
                 prompt_service=prompt_service,
+                duplicate_key_filter_enabled=duplicate_key_filter_enabled,
             )
             startup_authenticated = await endpoint_proxy.ensure_authenticated()
             if startup_authenticated:

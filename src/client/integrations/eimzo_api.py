@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import aiohttp
 
+from client.domain.certificate_filter import filter_duplicate_certificate_keys
 from client.domain.commands import ProxyCommand
 from client.domain.key_identity_store import KeyIdentity, KeyIdentityStore
 from client.system.certificates import build_client_ssl_context
@@ -34,6 +35,7 @@ _CHANGE_PASSWORD_COMMAND_NAME = "change_password"
 _AUTH_PLUGIN_NAME = "auth"
 _AUTH_LOGIN_COMMAND_NAME = "login"
 _AUTH_INVALID_STATUS_CODES = {400, 401, 403}
+_CERTIFICATE_LIST_COMMAND_NAMES = {"list_certificates", "list_all_certificates"}
 _ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 30.0
 _SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS = 2.0
 _LOG_ARGUMENT_VALUE_MAX_CHARS = 40
@@ -144,6 +146,7 @@ class EimzoApiClient:
         key_identity_store: KeyIdentityStore | None = None,
         prompt_service: PromptService | None = None,
         clock: Callable[[], float] | None = None,
+        duplicate_key_filter_enabled: Callable[[], bool] | None = None,
     ) -> None:
         self._session = session
         self._api_base_url = api_base_url.rstrip("/")
@@ -154,6 +157,7 @@ class EimzoApiClient:
         self._key_identity_store = key_identity_store or KeyIdentityStore()
         self._prompt_service = prompt_service or TkPromptService()
         self._clock = clock or time.time
+        self._duplicate_key_filter_enabled = duplicate_key_filter_enabled or _duplicate_key_filter_disabled
         self._access_token: AccessToken | None = None
         self._auth_lock = asyncio.Lock()
         self._sensitive_confirmation_cooldown_until_by_key: dict[tuple[str | None, str, str], float] = {}
@@ -310,7 +314,11 @@ class EimzoApiClient:
                 response=response.proxy_response,
                 origin=origin,
             )
-            return response.proxy_response
+            return self._filter_duplicate_certificate_keys_if_enabled(
+                command=command,
+                command_label=command_label,
+                response=response.proxy_response,
+            )
         except _UpstreamRequestError as error:
             LOGGER.warning("E-IMZO API request failed for %s: %s", command_label, error)
             return _failed_proxy_response(str(error))
@@ -323,6 +331,44 @@ class EimzoApiClient:
             segments.append(str(plugin).strip("/"))
         segments.append(str(name).strip("/"))
         return "/".join(segment for segment in segments if segment)
+
+    def _filter_duplicate_certificate_keys_if_enabled(
+        self,
+        *,
+        command: ProxyCommand,
+        command_label: str,
+        response: ProxyResponse,
+    ) -> ProxyResponse:
+        if command.name not in _CERTIFICATE_LIST_COMMAND_NAMES:
+            return response
+
+        try:
+            enabled = self._duplicate_key_filter_enabled()
+        except Exception:
+            LOGGER.exception("Could not read duplicate certificate key filter state.")
+            return response
+
+        if not enabled:
+            return response
+
+        payload = _decode_json_payload(response.body, charset=response.charset)
+        if not isinstance(payload, dict):
+            return response
+
+        filter_result = filter_duplicate_certificate_keys(payload.get("certificates"))
+        if filter_result is None or filter_result.removed_count == 0:
+            return response
+
+        filtered_payload = dict(payload)
+        filtered_payload["certificates"] = filter_result.certificates
+        LOGGER.info(
+            "Filtered duplicate certificate keys for %s. removed=%s kept=%s",
+            command_label,
+            filter_result.removed_count,
+            len(filter_result.certificates),
+            extra=_USER_ACTION_LOG_EXTRA,
+        )
+        return ProxyResponse.from_json(filtered_payload)
 
     def get_identity_by_key_id(self, key_id: str, *, origin: str | None = None) -> str | None:
         identity = self._key_identity_store.get_key_identity(key_id, origin=origin)
@@ -594,6 +640,10 @@ class EimzoApiClient:
 
 def _cancelled_proxy_response() -> ProxyResponse:
     return ProxyResponse.from_json({"success": False})
+
+
+def _duplicate_key_filter_disabled() -> bool:
+    return False
 
 
 def _failed_proxy_response(message: str) -> ProxyResponse:
