@@ -25,6 +25,7 @@ _UNEXPECTED_PATH_CLOSE_REASON = "Unexpected WebSocket path"
 _LEGACY_SERVER_CLOSE_REASON = "Server closed"
 _SUPPORTED_WEBSOCKET_VERSION = "13"
 _LEGACY_WEBSOCKET_VERSIONS = frozenset({"7", "8"})
+_MAX_WEBSOCKET_MESSAGE_SIZE_BYTES = 32 * 1024 * 1024
 
 
 class WebSocketPortInUseError(RuntimeError):
@@ -149,6 +150,7 @@ class WebSocketProxyServer:
                     process_request=self._process_opening_handshake_request,
                     ping_interval=self._config.ws_ping_interval_seconds,
                     ping_timeout=self._config.ws_ping_timeout_seconds,
+                    max_size=_MAX_WEBSOCKET_MESSAGE_SIZE_BYTES,
                 )
             )
         except OSError as error:
