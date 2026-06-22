@@ -188,6 +188,7 @@ def _resolve_api_eimzo_url(
     normalized_url = _prompt_and_persist_api_eimzo_url(
         runtime_dir=runtime_dir,
         current_value=settings.api_eimzo_url,
+        duplicate_key_filter_enabled=settings.duplicate_key_filter_enabled,
         settings_store=settings_store,
         prompt_api_url=prompt_api_url,
     )
@@ -210,6 +211,7 @@ def prompt_and_save_api_eimzo_url(
     return _prompt_and_persist_api_eimzo_url(
         runtime_dir=runtime_dir,
         current_value=settings.api_eimzo_url,
+        duplicate_key_filter_enabled=settings.duplicate_key_filter_enabled,
         settings_store=settings_store,
         prompt_api_url=prompt_api_url or _prompt_api_url,
     )
@@ -230,6 +232,7 @@ def _prompt_and_persist_api_eimzo_url(
     *,
     runtime_dir: Path,
     current_value: str | None,
+    duplicate_key_filter_enabled: bool,
     settings_store: AppSettingsStore,
     prompt_api_url: Callable[[str | None, str | None], str | None],
 ) -> str | None:
@@ -250,7 +253,7 @@ def _prompt_and_persist_api_eimzo_url(
         settings_store.save(
             AppSettings(
                 api_eimzo_url=normalized_url,
-                duplicate_key_filter_enabled=settings.duplicate_key_filter_enabled,
+                duplicate_key_filter_enabled=duplicate_key_filter_enabled,
             )
         )
         LOGGER.info("Saved E-IMZO API URL from UI input to app settings: %s", normalized_url)
