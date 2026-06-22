@@ -7,6 +7,7 @@ import platform
 from pathlib import Path
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from client import __version__
@@ -24,7 +25,7 @@ from client.bootstrap.ssl_hardening import (
 )
 from client.system.app_icon import resolve_app_icon_path
 from client.system.autostart import sync_windows_auto_start
-from client.system.eimzo_process import launch_installed_eimzo
+from client.system.eimzo_process import launch_installed_eimzo, terminate_process_by_pid
 from client.system.single_instance import SingleInstanceLock
 from client.system.tray_icon import WindowsTrayIcon
 from client.system.updates import (
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 _TRAY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_DUPLICATE_INSTANCE_RESTART_TIMEOUT_SECONDS = 10.0
+_DUPLICATE_INSTANCE_RESTART_POLL_SECONDS = 0.25
 
 
 def _load_run_app() -> "Callable[..., Awaitable[None]]":
@@ -85,15 +88,23 @@ def main() -> None:
     sync_windows_auto_start(enabled=config.windows_auto_start_enabled)
     instance_lock = SingleInstanceLock(config.runtime_dir / "instance.lock")
     if not instance_lock.acquire():
-        logging.getLogger(__name__).warning("Another E-IMZO ATB Client instance is already running.")
-        try:
-            show_info_message(
-                title="E-IMZO ATB Client уже запущен",
-                message="Нельзя запускать несколько экземпляров одновременно. Закройте текущий экземпляр и попробуйте снова.",
-            )
-        except Exception:
-            logging.getLogger(__name__).exception("Could not show duplicate-instance warning dialog.")
-        raise SystemExit(0)
+        owner_pid = instance_lock.owner_pid()
+        logging.getLogger(__name__).warning(
+            "Another E-IMZO ATB Client instance is already running. owner_pid=%s",
+            owner_pid,
+        )
+        if not _restart_existing_instance_and_acquire_lock(instance_lock, owner_pid=owner_pid):
+            try:
+                show_info_message(
+                    title="E-IMZO ATB Client не удалось перезапустить",
+                    message=(
+                        "Не удалось закрыть предыдущий экземпляр E-IMZO ATB Client автоматически.\n\n"
+                        "Закройте его через диспетчер задач и запустите программу снова."
+                    ),
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("Could not show duplicate-instance restart failure dialog.")
+            raise SystemExit(0)
 
     try:
         if maybe_start_self_update_from_github_release_with_notification(
@@ -113,6 +124,39 @@ def main() -> None:
             raise SystemExit(1)
     finally:
         instance_lock.release()
+
+
+def _restart_existing_instance_and_acquire_lock(
+    instance_lock: SingleInstanceLock,
+    *,
+    owner_pid: int | None,
+) -> bool:
+    logger = logging.getLogger(__name__)
+    if owner_pid is None:
+        logger.error("Cannot restart existing instance because the owner PID is unknown.")
+        return False
+
+    if owner_pid == os.getpid():
+        logger.error("Cannot restart existing instance because the owner PID matches the current process.")
+        return False
+
+    logger.info("Terminating previous E-IMZO ATB Client instance. owner_pid=%s", owner_pid)
+    if not terminate_process_by_pid(pid=owner_pid):
+        logger.error("Could not terminate previous E-IMZO ATB Client instance. owner_pid=%s", owner_pid)
+        return False
+
+    deadline = time.monotonic() + _DUPLICATE_INSTANCE_RESTART_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if instance_lock.acquire():
+            logger.info("Previous E-IMZO ATB Client instance was terminated; continuing startup.")
+            return True
+        time.sleep(_DUPLICATE_INSTANCE_RESTART_POLL_SECONDS)
+
+    logger.error(
+        "Previous E-IMZO ATB Client instance was terminated, but the lock was not released in %.1f seconds.",
+        _DUPLICATE_INSTANCE_RESTART_TIMEOUT_SECONDS,
+    )
+    return False
 
 
 async def _run_with_system_tray(config: AppConfig) -> None:

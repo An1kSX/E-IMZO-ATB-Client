@@ -161,7 +161,8 @@ class EimzoApiClient:
         self._access_token: AccessToken | None = None
         self._auth_lock = asyncio.Lock()
         self._sensitive_confirmation_cooldown_until_by_key: dict[tuple[str | None, str, str], float] = {}
-        self._sensitive_confirmation_locks_by_key: dict[tuple[str | None, str, str], asyncio.Lock] = {}
+        self._sensitive_confirmation_auto_approve_until = 0.0
+        self._sensitive_confirmation_lock = asyncio.Lock()
 
     async def ensure_authenticated(self) -> bool:
         try:
@@ -188,56 +189,21 @@ class EimzoApiClient:
 
         manual_password: str | None = None
         if prepared_request.sensitive_identity is not None:
-            cooldown_key = self._build_sensitive_confirmation_cooldown_key(
+            confirmation = await self._confirm_sensitive_operation(
                 command=command,
                 origin=origin,
                 identity=prepared_request.sensitive_identity,
+                command_label=command_label,
             )
 
-            if cooldown_key is not None:
-                confirmation_lock = self._sensitive_confirmation_locks_by_key.setdefault(cooldown_key, asyncio.Lock())
-                async with confirmation_lock:
-                    if self._is_sensitive_confirmation_cooldown_active(cooldown_key):
-                        LOGGER.info(
-                            "Skipped confirmation for %s due cooldown. origin=%s identity=%s",
-                            command_label,
-                            origin,
-                            prepared_request.sensitive_identity,
-                            extra=_USER_ACTION_LOG_EXTRA,
-                        )
-                        approved = True
-                    else:
-                        confirmation = _normalize_sensitive_confirmation(
-                            await self._prompt_service.confirm_sensitive_operation(
-                                command=command,
-                                identity=prepared_request.sensitive_identity,
-                            )
-                        )
-                        approved = confirmation.approved
-                        manual_password = confirmation.manual_password
-                        if manual_password is not None:
-                            LOGGER.info(
-                                "Using manually entered password for %s.",
-                                command_label,
-                                extra=_USER_ACTION_LOG_EXTRA,
-                            )
-                        if approved:
-                            self._remember_sensitive_confirmation(cooldown_key)
-            else:
-                confirmation = _normalize_sensitive_confirmation(
-                    await self._prompt_service.confirm_sensitive_operation(
-                        command=command,
-                        identity=prepared_request.sensitive_identity,
-                    )
+            approved = confirmation.approved
+            manual_password = confirmation.manual_password
+            if manual_password is not None:
+                LOGGER.info(
+                    "Using manually entered password for %s.",
+                    command_label,
+                    extra=_USER_ACTION_LOG_EXTRA,
                 )
-                approved = confirmation.approved
-                manual_password = confirmation.manual_password
-                if manual_password is not None:
-                    LOGGER.info(
-                        "Using manually entered password for %s.",
-                        command_label,
-                        extra=_USER_ACTION_LOG_EXTRA,
-                    )
 
             if not approved:
                 LOGGER.info(
@@ -322,6 +288,52 @@ class EimzoApiClient:
         except _UpstreamRequestError as error:
             LOGGER.warning("E-IMZO API request failed for %s: %s", command_label, error)
             return _failed_proxy_response(str(error))
+
+    async def _confirm_sensitive_operation(
+        self,
+        *,
+        command: ProxyCommand,
+        origin: str | None,
+        identity: str,
+        command_label: str,
+    ) -> SensitiveOperationConfirmation:
+        async with self._sensitive_confirmation_lock:
+            if self._is_sensitive_confirmation_auto_approve_active():
+                LOGGER.info(
+                    "Skipped confirmation for %s due user auto-approve window. origin=%s identity=%s",
+                    command_label,
+                    origin,
+                    identity,
+                    extra=_USER_ACTION_LOG_EXTRA,
+                )
+                return SensitiveOperationConfirmation(approved=True)
+
+            cooldown_key = self._build_sensitive_confirmation_cooldown_key(
+                command=command,
+                origin=origin,
+                identity=identity,
+            )
+            if cooldown_key is not None and self._is_sensitive_confirmation_cooldown_active(cooldown_key):
+                LOGGER.info(
+                    "Skipped confirmation for %s due cooldown. origin=%s identity=%s",
+                    command_label,
+                    origin,
+                    identity,
+                    extra=_USER_ACTION_LOG_EXTRA,
+                )
+                return SensitiveOperationConfirmation(approved=True)
+
+            confirmation = _normalize_sensitive_confirmation(
+                await self._prompt_service.confirm_sensitive_operation(
+                    command=command,
+                    identity=identity,
+                )
+            )
+            if confirmation.approved:
+                if cooldown_key is not None:
+                    self._remember_sensitive_confirmation(cooldown_key)
+                self._remember_sensitive_confirmation_auto_approve(confirmation.auto_approve_for_seconds)
+            return confirmation
 
     def _build_endpoint_url(self, plugin: str | None, name: str) -> str:
         segments = [self._api_base_url]
@@ -632,9 +644,30 @@ class EimzoApiClient:
             return False
         return expires_at > self._clock()
 
+    def _is_sensitive_confirmation_auto_approve_active(self) -> bool:
+        return self._sensitive_confirmation_auto_approve_until > self._clock()
+
     def _remember_sensitive_confirmation(self, cooldown_key: tuple[str | None, str, str]) -> None:
         self._sensitive_confirmation_cooldown_until_by_key[cooldown_key] = (
             self._clock() + _SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS
+        )
+
+    def _remember_sensitive_confirmation_auto_approve(self, duration_seconds: float | None) -> None:
+        if duration_seconds is None:
+            return
+
+        try:
+            normalized_duration = float(duration_seconds)
+        except (TypeError, ValueError):
+            return
+
+        if normalized_duration <= 0:
+            return
+
+        expires_at = self._clock() + normalized_duration
+        self._sensitive_confirmation_auto_approve_until = max(
+            self._sensitive_confirmation_auto_approve_until,
+            expires_at,
         )
 
 

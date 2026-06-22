@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures.thread as futures_thread
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 import logging
+import threading
 from typing import Protocol
+import weakref
 
 from client.domain.commands import ProxyCommand
 
 LOGGER = logging.getLogger(__name__)
 _USER_ACTION_LOG_EXTRA = {"user_action": True}
+_SENSITIVE_OPERATION_AUTO_APPROVE_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +27,7 @@ class PortConflictResolution:
 class SensitiveOperationConfirmation:
     approved: bool
     manual_password: str | None = None
+    auto_approve_for_seconds: float | None = None
 
 
 class PromptService(Protocol):
@@ -64,7 +69,7 @@ class PromptService(Protocol):
 
 class TkPromptService:
     def __init__(self) -> None:
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="eimzo-ui")
+        self._executor = _DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="eimzo-ui")
 
     async def confirm_sensitive_operation(
         self,
@@ -131,7 +136,35 @@ class TkPromptService:
         )
 
     def close(self) -> None:
-        self._executor.shutdown(wait=True, cancel_futures=False)
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue) -> None:
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads >= self._max_workers:
+            return
+
+        thread_name = "%s_%d" % (self._thread_name_prefix or self, num_threads)
+        thread = threading.Thread(
+            name=thread_name,
+            target=futures_thread._worker,
+            args=(
+                weakref.ref(self, weakref_cb),
+                self._work_queue,
+                self._initializer,
+                self._initargs,
+            ),
+            daemon=True,
+        )
+        thread.start()
+        self._threads.add(thread)
 
 
 def prompt_api_base_url(
@@ -249,6 +282,7 @@ def _show_confirmation_dialog(
         def __init__(self, parent: tk.Misc) -> None:
             self.result = SensitiveOperationConfirmation(approved=False)
             self._manual_password: str | None = None
+            self._auto_approve_var = tk.BooleanVar(master=parent, value=False)
             super().__init__(parent, title="Подтверждение операции")
 
         def body(self, master: tk.Misc) -> tk.Widget:
@@ -265,6 +299,12 @@ def _show_confirmation_dialog(
                 wraplength=360,
                 justify="left",
             ).grid(row=0, column=0, sticky="w")
+
+            ttk.Checkbutton(
+                container,
+                text="Не показывать окно 30 секунд (автоматическое подтверждение)",
+                variable=self._auto_approve_var,
+            ).grid(row=1, column=0, sticky="w", pady=(12, 0))
 
             return container
 
@@ -302,6 +342,9 @@ def _show_confirmation_dialog(
             self.result = SensitiveOperationConfirmation(
                 approved=True,
                 manual_password=self._manual_password,
+                auto_approve_for_seconds=(
+                    _SENSITIVE_OPERATION_AUTO_APPROVE_SECONDS if self._auto_approve_var.get() else None
+                ),
             )
 
     return _run_dialog(dialog_factory=ConfirmationDialog)
