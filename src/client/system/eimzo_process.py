@@ -446,9 +446,6 @@ def _matches_eimzo_identity(
     if normalized_name == _EIMZO_PROCESS_NAME.casefold():
         return True
 
-    if normalized_name in _EIMZO_PROCESS_NAME_ALIASES and not normalized_executable_path and not normalized_command_line:
-        return True
-
     if normalized_name in {"javaw.exe", "java.exe"} and normalized_executable_path.startswith(_EIMZO_INSTALL_DIR):
         return True
 
