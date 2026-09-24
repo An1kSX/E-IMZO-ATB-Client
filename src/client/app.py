@@ -10,6 +10,7 @@ import aiohttp
 from client.bootstrap.config import AppConfig
 from client.integrations.eimzo_api import EimzoApiClient
 from client.system.account import resolve_account_name
+from client.system.audit_identity import installation_id
 from client.system.autostart import disable_known_eimzo_autostart
 from client.system.certificates import maintain_localhost_certificate, resolve_server_certificate
 from client.system.eimzo_process import (
@@ -71,6 +72,7 @@ async def run_app(
                 api_base_url=config.api_eimzo_url,
                 api_path_prefix=config.api_eimzo_path_prefix,
                 account_name=account_name,
+                audit_client_id=installation_id(config.runtime_dir),
                 api_ca_cert_path=config.api_eimzo_ca_cert_path,
                 send_account_header=config.api_eimzo_send_account_header,
                 prompt_service=prompt_service,

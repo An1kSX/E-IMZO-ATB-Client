@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+import platform
 import base64
 from dataclasses import dataclass
 import json
@@ -148,11 +150,14 @@ class EimzoApiClient:
         account_name: str,
         api_ca_cert_path: Path | None = None,
         send_account_header: bool = True,
+        audit_client_id: str | None = None,
         key_identity_store: KeyIdentityStore | None = None,
         prompt_service: PromptService | None = None,
         clock: Callable[[], float] | None = None,
         duplicate_key_filter_enabled: Callable[[], bool] | None = None,
     ) -> None:
+        self._audit_client_id = audit_client_id
+        self._audit_keys: OrderedDict[str, str] = OrderedDict()
         self._session = session
         self._api_base_url = api_base_url.rstrip("/")
         self._api_path_prefix = api_path_prefix
@@ -249,6 +254,7 @@ class EimzoApiClient:
                 endpoint_url=endpoint_url,
                 request_arguments=request_arguments,
                 access_token=token,
+                audit_context=self._audit_context(command, origin),
             )
             _log_forwarded_api_response(
                 command=command,
@@ -272,6 +278,7 @@ class EimzoApiClient:
                     endpoint_url=endpoint_url,
                     request_arguments=request_arguments,
                     access_token=token,
+                    audit_context=self._audit_context(command, origin),
                 )
                 _log_forwarded_api_response(
                     command=command,
@@ -280,11 +287,12 @@ class EimzoApiClient:
                     response=response,
                 )
 
-            self._remember_key_identity(
-                load_key_identity_payload=load_key_identity_payload,
-                response=response.proxy_response,
-                origin=origin,
-            )
+            if 200 <= response.status < 300:
+                self._remember_key_identity(
+                    load_key_identity_payload=load_key_identity_payload,
+                    response=response.proxy_response,
+                    origin=origin,
+                )
             return self._filter_duplicate_certificate_keys_if_enabled(
                 command=command,
                 command_label=command_label,
@@ -407,6 +415,16 @@ class EimzoApiClient:
         if key_id is None:
             return
 
+        load_response = _decode_json_payload(response.body, charset=response.charset)
+        if isinstance(load_response, dict) and load_response.get("success") is False:
+            return
+
+        self._audit_keys.pop(key_id, None)
+        if load_key_identity_payload.key_alias:
+            self._audit_keys[key_id] = load_key_identity_payload.key_alias
+            while len(self._audit_keys) > 1000:
+                self._audit_keys.popitem(last=False)
+
         identity = self._key_identity_store.remember(
             key_id=key_id,
             key_alias=load_key_identity_payload.key_alias,
@@ -429,6 +447,25 @@ class EimzoApiClient:
             identity.inn,
             identity.pinfl,
         )
+
+    def _audit_context(self, command: ProxyCommand, origin: str | None) -> dict[str, str] | None:
+        if (command.plugin, command.name) not in {
+            ("pkcs7", "create_pkcs7"), ("x509", "get_certificate_chain"),
+        }:
+            return None
+        context = {"computer_name": platform.node()[:1024]}
+        if self._audit_client_id:
+            context["client_id"] = self._audit_client_id
+        if origin:
+            context["origin"] = origin[:1024]
+        arguments = command.arguments
+        if isinstance(arguments, dict):
+            arguments = arguments.get("arguments", [])
+        if isinstance(arguments, (list, tuple)):
+            key_id = _extract_key_id_from_identity_command(command=command, arguments=arguments)
+            if key_id in self._audit_keys:
+                context["key_name"] = self._audit_keys[key_id][:1024]
+        return context
 
     def _build_request(self, command: ProxyCommand, *, origin: str | None = None) -> PreparedRequest:
         arguments = command.arguments
@@ -488,6 +525,7 @@ class EimzoApiClient:
         endpoint_url: str,
         request_arguments: Any,
         access_token: str,
+        audit_context: dict[str, str] | None = None,
     ) -> HttpProxyResponse:
         method = "GET"
         json_payload: Any = _MISSING
@@ -496,6 +534,10 @@ class EimzoApiClient:
             json_payload = request_arguments
 
         headers = {"Authorization": f"Bearer {access_token}"}
+        if audit_context is not None:
+            headers["X-ATB-Audit"] = base64.b64encode(
+                json.dumps(audit_context, ensure_ascii=True).encode("utf-8")
+            ).decode("ascii")
         return await self._request(
             method=method,
             endpoint_url=endpoint_url,
