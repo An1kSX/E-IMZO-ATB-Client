@@ -31,6 +31,9 @@ class SensitiveOperationConfirmation:
 
 
 class PromptService(Protocol):
+    async def show_access_error(self, *, message: str) -> None:
+        ...
+
     async def confirm_sensitive_operation(
         self,
         *,
@@ -70,6 +73,12 @@ class PromptService(Protocol):
 class TkPromptService:
     def __init__(self) -> None:
         self._executor = _DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="eimzo-ui")
+
+    async def show_access_error(self, *, message: str) -> None:
+        await asyncio.get_running_loop().run_in_executor(
+            self._executor,
+            partial(_show_info_dialog, title="E-IMZO — доступ запрещён", message=message),
+        )
 
     async def confirm_sensitive_operation(
         self,

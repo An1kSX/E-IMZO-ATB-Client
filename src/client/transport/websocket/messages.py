@@ -16,4 +16,6 @@ def parse_proxy_command(raw_message: str | bytes) -> ProxyCommand:
         name=payload["name"],
         arguments=payload.get("arguments"),
         has_arguments=has_arguments,
+        request_id=payload.get("id"),
+        has_request_id="id" in payload,
     )

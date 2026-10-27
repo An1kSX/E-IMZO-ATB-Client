@@ -10,3 +10,5 @@ class ProxyCommand:
     plugin: str | None = None
     arguments: Any = None
     has_arguments: bool = False
+    request_id: Any = None
+    has_request_id: bool = False

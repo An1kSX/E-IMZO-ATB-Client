@@ -10,7 +10,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import serve as legacy_websocket_serve
 
 from client.bootstrap.config import AppConfig
-from client.integrations.eimzo_api import EimzoApiClient
+from client.integrations.eimzo_api import EimzoApiClient, ProxyResponse
 from client.system.certificates import build_websocket_server_ssl_context
 from client.transport.websocket.messages import parse_proxy_command
 
@@ -178,7 +178,7 @@ class WebSocketProxyServer:
             )
 
     async def _process_opening_handshake_request(self, path: str, request_headers: Any) -> Any:
-        origin = _normalize_singleton_header(request_headers, "Origin")
+        origin = _safe_get_header(request_headers, "Origin")
         websocket_key = _normalize_singleton_header(request_headers, "Sec-WebSocket-Key")
         requested_version = _normalize_singleton_header(request_headers, "Sec-WebSocket-Version")
         host = _safe_get_header(request_headers, "Host")
@@ -300,6 +300,7 @@ class WebSocketProxyServer:
         origin: str | None,
         remote_address: str | None,
     ) -> None:
+        command = None
         try:
             command = parse_proxy_command(raw_message)
             command_label = _format_command_label(command.plugin, command.name)
@@ -319,12 +320,20 @@ class WebSocketProxyServer:
                 reason=_REQUEST_COMPLETED_CLOSE_REASON,
             )
         except Exception:
-            LOGGER.exception(
+            LOGGER.error(
                 "Failed to process local WebSocket message: origin=%s path=%s remote=%s",
                 origin,
                 request_path,
                 remote_address,
             )
+            payload = {"success": False, "message": "Не удалось выполнить операцию.", "code": "CLIENT_ERROR"}
+            if command is not None and command.has_request_id:
+                payload["id"] = command.request_id
+            try:
+                await websocket.send(ProxyResponse.from_json(payload).to_websocket_payload())
+                await websocket.close(code=_CLOSE_CODE_NORMAL_CLOSURE, reason=_REQUEST_COMPLETED_CLOSE_REASON)
+            except ConnectionClosed:
+                pass
 
     def _resolve_request_path(self, websocket: Any, path: str | None) -> str | None:
         if path is not None:
@@ -345,15 +354,7 @@ class WebSocketProxyServer:
         if headers is None:
             return None
 
-        for header_name in ("Origin", "origin"):
-            try:
-                header_value = headers.get(header_name)
-            except AttributeError:
-                header_value = headers.get(header_name)
-            if header_value:
-                return str(header_value)
-
-        return None
+        return _safe_get_header(headers, "Origin") or _safe_get_header(headers, "origin")
 
     def _resolve_request_headers(self, websocket: Any) -> Any | None:
         request = getattr(websocket, "request", None)

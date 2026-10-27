@@ -42,19 +42,7 @@ _AUTH_INVALID_STATUS_CODES = {400, 401, 403}
 _CERTIFICATE_LIST_COMMAND_NAMES = {"list_certificates", "list_all_certificates"}
 _ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 30.0
 _SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS = 2.0
-_LOG_ARGUMENT_VALUE_MAX_CHARS = 40
-_LOG_BODY_VALUE_MAX_CHARS = 40
-_LOG_RESPONSE_BODY_MAX_CHARS = 1000
-_LOG_BODY_COLLECTION_MAX_ITEMS = 10
 _MISSING = object()
-_REDACTED_LOG_VALUE = "<redacted>"
-_SENSITIVE_LOG_KEY_PARTS = (
-    "authorization",
-    "jwt",
-    "password",
-    "secret",
-    "token",
-)
 _IDENTITY_ARGUMENT_KEY_ID_INDEXES: dict[tuple[str | None, str], int] = {
     (_PKCS7_PLUGIN_NAME, _CREATE_PKCS7_COMMAND_NAME): 1,
     (_PKCS7_PLUGIN_NAME, _APPEND_PKCS7_ATTACHED_COMMAND_NAME): 1,
@@ -71,6 +59,17 @@ _ARGUMENTS_PASSWORD_BODY_COMMANDS: set[tuple[str | None, str]] = {
     (_PKCS7_PLUGIN_NAME, _APPEND_PKCS7_ATTACHED_COMMAND_NAME),
     (_X509_PLUGIN_NAME, _GET_CERTIFICATE_CHAIN_COMMAND_NAME),
 }
+_ACCESS_CHECK_COMMANDS = _ARGUMENTS_PASSWORD_BODY_COMMANDS | {
+    ("pfx", "load_key"),
+    ("pfx", "verify_password"),
+    ("pfx", "change_password"),
+    ("pfx", "save_pfx"),
+    ("pfx", "save_temporary_pfx"),
+    ("pki", "enroll_pfx_step1"),
+    ("pki", "enroll_pfx_step2"),
+}
+_ACCESS_ERROR_MESSAGE = "Не удалось проверить права доступа. Операция отменена. Обратитесь к администратору."
+_ACCESS_UNAVAILABLE_MESSAGE = "Не удалось проверить права доступа. Повторите попытку позже."
 _SENSITIVE_CONFIRMATION_COOLDOWN_GROUP_PASSWORD_AUTOFILL = "password_autofill"
 LOGGER = logging.getLogger(__name__)
 _USER_ACTION_LOG_EXTRA = {"user_action": True}
@@ -173,6 +172,8 @@ class EimzoApiClient:
         self._sensitive_confirmation_cooldown_until_by_key: dict[tuple[str | None, str, str], float] = {}
         self._sensitive_confirmation_auto_approve_until = 0.0
         self._sensitive_confirmation_lock = asyncio.Lock()
+        self._access_error_tasks: dict[str, asyncio.Task[None]] = {}
+        self._access_error_cooldowns: OrderedDict[str, float] = OrderedDict()
 
     async def ensure_authenticated(self) -> bool:
         try:
@@ -185,7 +186,30 @@ class EimzoApiClient:
             return False
 
     async def forward(self, command: ProxyCommand, *, origin: str | None = None) -> ProxyResponse:
+        try:
+            response = await self._forward(command, origin=origin)
+        except _UpstreamRequestError:
+            LOGGER.warning("Remote API unavailable. command=%s origin=%s", command.name, origin)
+            response = self._access_failure(code="ACCESS_SERVICE_UNAVAILABLE", message=_ACCESS_UNAVAILABLE_MESSAGE)
+
+        if command.has_request_id:
+            payload = _decode_json_payload(response.body, charset=response.charset)
+            if isinstance(payload, dict):
+                payload["id"] = command.request_id
+                response = ProxyResponse.from_json(payload)
+        return response
+
+    async def _forward(self, command: ProxyCommand, *, origin: str | None) -> ProxyResponse:
         endpoint_url = self._build_endpoint_url(command.plugin, command.name)
+        audit_context = self._audit_context(command, origin)
+        token = await self._ensure_access_token(reason="Введите пароль для получения доступа к E-IMZO API.")
+        if token is None:
+            return _cancelled_proxy_response()
+        if (command.plugin, command.name) in _ACCESS_CHECK_COMMANDS:
+            token, failure = await self._check_access(token=token, audit_context=audit_context)
+            if failure is not None:
+                return failure
+
         load_key_identity_payload = _extract_identity_payload_from_load_key_command(command)
         prepared_request = self._build_request(command, origin=origin)
         command_label = _format_command_label(plugin=command.plugin, name=command.name)
@@ -243,23 +267,15 @@ class EimzoApiClient:
         )
 
         try:
-            token = await self._ensure_access_token(
-                reason="Введите пароль для получения доступа к E-IMZO API.",
-            )
-            if token is None:
-                return _cancelled_proxy_response()
-
             response = await self._forward_with_token(
                 command=command,
                 endpoint_url=endpoint_url,
                 request_arguments=request_arguments,
                 access_token=token,
-                audit_context=self._audit_context(command, origin),
+                audit_context=audit_context,
             )
             _log_forwarded_api_response(
-                command=command,
                 command_label=command_label,
-                request_arguments=request_arguments,
                 response=response,
             )
 
@@ -273,19 +289,34 @@ class EimzoApiClient:
                 if token is None:
                     return _cancelled_proxy_response()
 
+                if (command.plugin, command.name) in _ACCESS_CHECK_COMMANDS:
+                    token, failure = await self._check_access(token=token, audit_context=audit_context)
+                    if failure is not None:
+                        return failure
+
                 response = await self._forward_with_token(
                     command=command,
                     endpoint_url=endpoint_url,
                     request_arguments=request_arguments,
                     access_token=token,
-                    audit_context=self._audit_context(command, origin),
+                    audit_context=audit_context,
                 )
                 _log_forwarded_api_response(
-                    command=command,
                     command_label=command_label,
-                    request_arguments=request_arguments,
                     response=response,
                 )
+
+            if response.status in {401, 403, 503}:
+                if response.status == 401:
+                    self._access_token = None
+                return self._access_response_failure(response)
+            if response.status >= 400:
+                return response.proxy_response
+            if (command.plugin, command.name) in _ACCESS_CHECK_COMMANDS and (
+                not 200 <= response.status < 300
+                or _decode_json_payload(response.proxy_response.body, charset=response.proxy_response.charset) is None
+            ):
+                return self._access_failure(code="ACCESS_CHECK_FAILED", message=_ACCESS_ERROR_MESSAGE)
 
             if 200 <= response.status < 300:
                 self._remember_key_identity(
@@ -298,9 +329,80 @@ class EimzoApiClient:
                 command_label=command_label,
                 response=response.proxy_response,
             )
-        except _UpstreamRequestError as error:
-            LOGGER.warning("E-IMZO API request failed for %s: %s", command_label, error)
-            return _failed_proxy_response(str(error))
+        except _UpstreamRequestError:
+            return self._access_failure(code="ACCESS_SERVICE_UNAVAILABLE", message=_ACCESS_UNAVAILABLE_MESSAGE)
+
+    async def _check_access(
+        self, *, token: str, audit_context: dict[str, str],
+    ) -> tuple[str | None, ProxyResponse | None]:
+        for attempt in range(2):
+            response = await self._request(
+                method="POST",
+                endpoint_url=self._build_endpoint_url("auth", "check_access"),
+                headers=_authenticated_headers(token, audit_context),
+            )
+            if response.status != 401:
+                break
+            self._access_token = None
+            if attempt == 1:
+                return None, self._access_response_failure(response)
+            token = await self._ensure_access_token(
+                force_refresh=True, reason="Срок действия сессии истек. Введите пароль повторно.",
+            )
+            if token is None:
+                return None, _cancelled_proxy_response()
+
+        payload = _decode_json_payload(response.proxy_response.body, charset=response.proxy_response.charset)
+        if response.status == 200 and isinstance(payload, dict) and payload.get("success") is True:
+            return token, None
+        return None, self._access_response_failure(response)
+
+    def _access_response_failure(self, response: HttpProxyResponse) -> ProxyResponse:
+        payload = _decode_json_payload(response.proxy_response.body, charset=response.proxy_response.charset)
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        detail = detail if isinstance(detail, dict) else {}
+        code = detail.get("code")
+        origin = detail.get("origin")
+        message = _ACCESS_ERROR_MESSAGE
+        if response.status == 403 and isinstance(code, str) and code in {
+            "ORIGIN_ACCESS_DENIED", "ROLE_REQUIRED", "ORIGIN_REQUIRED", "ORIGIN_INVALID",
+        }:
+            if code == "ORIGIN_ACCESS_DENIED":
+                site = f" на сайте {origin}" if isinstance(origin, str) and origin else " на этом сайте"
+                message = f"У вас нет доступа к использованию ЭЦП{site}. Обратитесь к администратору."
+            else:
+                message = {
+                    "ROLE_REQUIRED": "Вам не назначена роль. Обратитесь к администратору.",
+                    "ORIGIN_REQUIRED": "Не удалось определить сайт запроса. Обновите клиент.",
+                    "ORIGIN_INVALID": "Клиент передал некорректный адрес сайта.",
+                }[code]
+        elif response.status == 503 and code == "ACCESS_SERVICE_UNAVAILABLE":
+            message = _ACCESS_UNAVAILABLE_MESSAGE
+        elif response.status == 401:
+            code = "SESSION_EXPIRED"
+            message = "Сессия недействительна. Выполните вход повторно."
+        else:
+            code = "ACCESS_CHECK_FAILED"
+        LOGGER.warning("Remote operation rejected. status=%s code=%s origin=%s", response.status, code, origin)
+        return self._access_failure(code=code, message=message)
+
+    def _access_failure(self, *, code: str, message: str) -> ProxyResponse:
+        # Notify independently so every browser receives its response even while the dialog is open.
+        if message not in self._access_error_tasks and self._access_error_cooldowns.get(message, 0) <= self._clock():
+            self._access_error_tasks[message] = asyncio.create_task(self._show_access_error(message))
+        return ProxyResponse.from_json({"success": False, "message": message, "code": code})
+
+    async def _show_access_error(self, message: str) -> None:
+        try:
+            await self._prompt_service.show_access_error(message=message)
+        except Exception:
+            LOGGER.warning("Could not display access error dialog.")
+        finally:
+            self._access_error_tasks.pop(message, None)
+            self._access_error_cooldowns[message] = self._clock() + _SENSITIVE_CONFIRMATION_COOLDOWN_SECONDS
+            self._access_error_cooldowns.move_to_end(message)
+            while len(self._access_error_cooldowns) > 100:
+                self._access_error_cooldowns.popitem(last=False)
 
     async def _confirm_sensitive_operation(
         self,
@@ -448,16 +550,15 @@ class EimzoApiClient:
             identity.pinfl,
         )
 
-    def _audit_context(self, command: ProxyCommand, origin: str | None) -> dict[str, str] | None:
-        if (command.plugin, command.name) not in {
-            ("pkcs7", "create_pkcs7"), ("x509", "get_certificate_chain"),
-        }:
-            return None
+    def _audit_context(self, command: ProxyCommand, origin: str | None) -> dict[str, str]:
         context = {"computer_name": platform.node()[:1024]}
         if self._audit_client_id:
             context["client_id"] = self._audit_client_id
-        if origin:
-            context["origin"] = origin[:1024]
+        if origin is not None:
+            context["origin"] = origin
+        identity_payload = _extract_identity_payload_from_load_key_command(command)
+        if identity_payload is not None and identity_payload.key_alias:
+            context["key_name"] = identity_payload.key_alias[:1024]
         arguments = command.arguments
         if isinstance(arguments, dict):
             arguments = arguments.get("arguments", [])
@@ -529,15 +630,11 @@ class EimzoApiClient:
     ) -> HttpProxyResponse:
         method = "GET"
         json_payload: Any = _MISSING
-        if command.has_arguments or _command_requires_new_pfx_password(command):
+        if command.has_arguments or (command.plugin, command.name) in _ACCESS_CHECK_COMMANDS:
             method = "POST"
             json_payload = request_arguments
 
-        headers = {"Authorization": f"Bearer {access_token}"}
-        if audit_context is not None:
-            headers["X-ATB-Audit"] = base64.b64encode(
-                json.dumps(audit_context, ensure_ascii=True).encode("utf-8")
-            ).decode("ascii")
+        headers = _authenticated_headers(access_token, audit_context)
         return await self._request(
             method=method,
             endpoint_url=endpoint_url,
@@ -602,18 +699,14 @@ class EimzoApiClient:
             return None
 
         if response.status >= 400:
-            raise RuntimeError(
-                "E-IMZO login failed with "
-                f"{response.status} {response.reason}: "
-                f"{_format_body_for_log(body=response.proxy_response.body, charset=response.proxy_response.charset)}"
-            )
+            raise _UpstreamRequestError(f"E-IMZO login failed with HTTP {response.status}.")
 
         token_value = _extract_access_token_from_response(
             response.proxy_response.body,
             charset=response.proxy_response.charset,
         )
         if token_value is None:
-            raise RuntimeError("E-IMZO login response did not contain a JWT token.")
+            raise _UpstreamRequestError("E-IMZO login response did not contain a JWT token.")
 
         expires_at = _extract_jwt_expiration(token_value)
         LOGGER.info("Received JWT token for account %s", account_name)
@@ -627,7 +720,7 @@ class EimzoApiClient:
         headers: dict[str, str],
         json_payload: Any = _MISSING,
     ) -> HttpProxyResponse:
-        request_kwargs: dict[str, Any] = {"headers": headers}
+        request_kwargs: dict[str, Any] = {"headers": headers, "allow_redirects": False}
         if self._api_ca_cert_path is not None:
             request_kwargs["ssl"] = build_client_ssl_context(self._api_ca_cert_path)
         if json_payload is not _MISSING:
@@ -644,14 +737,6 @@ class EimzoApiClient:
                     method,
                     endpoint_url,
                 )
-                if response.status >= 400:
-                    LOGGER.warning(
-                        "API error response body for %s %s: %s",
-                        method,
-                        endpoint_url,
-                        _format_body_for_log(body=body, charset=response.charset),
-                    )
-
                 return HttpProxyResponse(
                     status=response.status,
                     reason=response.reason,
@@ -662,13 +747,7 @@ class EimzoApiClient:
                     ),
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-            raise _UpstreamRequestError(
-                _format_transport_error_message(
-                    method=method,
-                    endpoint_url=endpoint_url,
-                    error=error,
-                )
-            ) from error
+            raise _UpstreamRequestError("Remote API request failed.") from error
 
     def _build_sensitive_confirmation_cooldown_key(
         self,
@@ -720,6 +799,15 @@ class EimzoApiClient:
 
 def _cancelled_proxy_response() -> ProxyResponse:
     return ProxyResponse.from_json({"success": False})
+
+
+def _authenticated_headers(token: str, audit_context: dict[str, str] | None) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {token}"}
+    if audit_context is not None:
+        headers["X-ATB-Audit"] = base64.b64encode(
+            json.dumps(audit_context, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+    return headers
 
 
 def _duplicate_key_filter_disabled() -> bool:
@@ -822,156 +910,17 @@ def _apply_manual_password_argument(*, arguments: Any, manual_password: str | No
     }
 
 
-def _format_transport_error_message(*, method: str, endpoint_url: str, error: Exception) -> str:
-    if isinstance(error, asyncio.TimeoutError):
-        details = "Request timed out."
-    else:
-        details = str(error).strip() or error.__class__.__name__
-    return f"{method} {endpoint_url}: {details}"
-
-
-def _format_body_for_log(*, body: bytes, charset: str | None) -> str:
-    if not body:
-        return "<empty>"
-
-    encoding = charset or "utf-8"
-    try:
-        text = body.decode(encoding)
-    except UnicodeDecodeError:
-        text = body.decode("utf-8", errors="replace")
-
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        payload = _MISSING
-
-    if payload is not _MISSING:
-        normalized_payload = _normalize_payload_for_log(
-            payload,
-            max_string_chars=_LOG_BODY_VALUE_MAX_CHARS,
-            max_collection_items=_LOG_BODY_COLLECTION_MAX_ITEMS,
-        )
-        try:
-            formatted_payload = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            formatted_payload = str(normalized_payload)
-        return _truncate_text_for_log(formatted_payload, max_chars=_LOG_RESPONSE_BODY_MAX_CHARS)
-
-    text = " ".join(text.split())
-    return _truncate_text_for_log(text, max_chars=_LOG_RESPONSE_BODY_MAX_CHARS)
-
-
 def _log_forwarded_api_response(
     *,
-    command: ProxyCommand,
     command_label: str,
-    request_arguments: Any,
     response: HttpProxyResponse,
 ) -> None:
     LOGGER.info(
-        "E-IMZO API server response. command=%s status=%s reason=%s arguments=%s body=%s",
+        "E-IMZO API server response. command=%s status=%s",
         command_label,
         response.status,
-        response.reason,
-        _format_arguments_for_log(command=command, arguments=request_arguments),
-        _format_body_for_log(body=response.proxy_response.body, charset=response.proxy_response.charset),
         extra=_USER_ACTION_LOG_EXTRA,
     )
-
-
-def _format_arguments_for_log(*, command: ProxyCommand, arguments: Any) -> str:
-    safe_arguments = _redact_sensitive_request_arguments(command=command, arguments=arguments)
-    normalized_arguments = _normalize_payload_for_log(
-        safe_arguments,
-        max_string_chars=_LOG_ARGUMENT_VALUE_MAX_CHARS,
-        max_collection_items=None,
-    )
-    try:
-        return json.dumps(normalized_arguments, ensure_ascii=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return _truncate_text_for_log(str(normalized_arguments), max_chars=_LOG_ARGUMENT_VALUE_MAX_CHARS)
-
-
-def _redact_sensitive_request_arguments(*, command: ProxyCommand, arguments: Any) -> Any:
-    if not _command_requires_new_pfx_password(command):
-        return arguments
-
-    if isinstance(arguments, dict):
-        redacted_arguments = dict(arguments)
-        nested_arguments = redacted_arguments.get("arguments")
-        if isinstance(nested_arguments, (list, tuple)) and nested_arguments:
-            redacted_arguments["arguments"] = [
-                *nested_arguments[:-1],
-                _REDACTED_LOG_VALUE,
-            ]
-        return redacted_arguments
-
-    if isinstance(arguments, (list, tuple)) and arguments:
-        return [*arguments[:-1], _REDACTED_LOG_VALUE]
-
-    return arguments
-
-
-def _normalize_payload_for_log(
-    value: Any,
-    *,
-    max_string_chars: int,
-    max_collection_items: int | None,
-) -> Any:
-    if isinstance(value, dict):
-        return {
-            _truncate_text_for_log(str(key), max_chars=max_string_chars): (
-                _REDACTED_LOG_VALUE
-                if _is_sensitive_log_key(key)
-                else _normalize_payload_for_log(
-                    nested_value,
-                    max_string_chars=max_string_chars,
-                    max_collection_items=max_collection_items,
-                )
-            )
-            for key, nested_value in value.items()
-        }
-
-    if isinstance(value, (list, tuple)):
-        items = list(value)
-        omitted_count = 0
-        if max_collection_items is not None and len(items) > max_collection_items:
-            omitted_count = len(items) - max_collection_items
-            items = items[:max_collection_items]
-
-        normalized_items = [
-            _normalize_payload_for_log(
-                item,
-                max_string_chars=max_string_chars,
-                max_collection_items=max_collection_items,
-            )
-            for item in items
-        ]
-        if omitted_count:
-            normalized_items.append(f"<{omitted_count} more items>")
-        return normalized_items
-
-    if isinstance(value, str):
-        return _truncate_text_for_log(value, max_chars=max_string_chars)
-
-    if isinstance(value, bytes):
-        return f"<{len(value)} bytes>"
-
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-
-    return _truncate_text_for_log(str(value), max_chars=max_string_chars)
-
-
-def _is_sensitive_log_key(key: Any) -> bool:
-    normalized_key = str(key).strip().casefold()
-    return any(part in normalized_key for part in _SENSITIVE_LOG_KEY_PARTS)
-
-
-def _truncate_text_for_log(text: str, *, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return f"{text[:max_chars]}..."
 
 
 def _extract_identity_payload_from_load_key_command(command: ProxyCommand) -> _LoadKeyIdentityPayload | None:
@@ -1141,7 +1090,7 @@ def _decode_json_payload(body: bytes, *, charset: str | None) -> Any | None:
     encoding = charset or "utf-8"
     try:
         return json.loads(body.decode(encoding))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (LookupError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
 

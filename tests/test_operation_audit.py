@@ -40,9 +40,11 @@ class FakeClientSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.requests = []
+        self.calls = []
 
     def request(self, method, url, **kwargs):
         self.requests.append(kwargs)
+        self.calls.append((method, url, kwargs))
         return self.responses.pop(0)
 
 
@@ -66,8 +68,12 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_key_mapping_across_origins_and_both_operations(self):
         session = FakeClientSession([
             _json_response({"token": _make_jwt(exp=4_000_000_000)}),
+            _json_response({"success": True}),
             _json_response({"success": True, "keyId": "key-a"}),
+            _json_response({"success": True}),
             _json_response({"success": True, "keyId": "key-b"}),
+            _json_response({"success": True}),
+            _json_response({"success": True}),
             _json_response({"success": True}),
             _json_response({"success": True}),
         ])
@@ -81,20 +87,25 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
             arguments=["secret-document", "key-a", "no"]), origin="https://second.uz")
         await client.forward(ProxyCommand(plugin="x509", name="get_certificate_chain", has_arguments=True,
             arguments=["key-b"]), origin="https://third.uz")
-        first, second = [json.loads(base64.b64decode(item["headers"]["X-ATB-Audit"])) for item in session.requests[-2:]]
+        first, second = [json.loads(base64.b64decode(item["headers"]["X-ATB-Audit"]))
+                         for method, url, item in session.calls
+                         if url.endswith(("/create_pkcs7", "/get_certificate_chain"))]
         self.assertEqual(first["key_name"], "DS1234567890001")
         self.assertEqual(second["key_name"], "DS1234567890002")
         self.assertEqual(first["origin"], "https://second.uz")
         self.assertEqual(second["origin"], "https://third.uz")
         self.assertEqual(first["client_id"], "installation-1")
         self.assertNotIn("secret", str(first))
-        for item in session.requests[:-2]:
-            self.assertNotIn("X-ATB-Audit", item["headers"])
+        self.assertNotIn("X-ATB-Audit", session.requests[0]["headers"])
+        for item in session.requests[1:]:
+            self.assertIn("X-ATB-Audit", item["headers"])
 
     async def test_failed_load_does_not_overwrite_mapping(self):
         session = FakeClientSession([
             _json_response({"token": _make_jwt(exp=4_000_000_000)}),
+            _json_response({"success": True}),
             _json_response({"success": True, "keyId": "key-a"}),
+            _json_response({"success": True}),
             _json_response({"success": False, "keyId": "key-a"}),
         ])
         client = EimzoApiClient(session=session, api_base_url="http://test", api_path_prefix="",
