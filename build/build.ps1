@@ -36,3 +36,20 @@ $pyInstallerArgs = @(
 )
 
 python @pyInstallerArgs
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller build failed."
+}
+
+$executablePath = Join-Path $projectRoot "dist/eimzo-atb-client.exe"
+$reportPath = Join-Path $projectRoot "build/pyinstaller/packaged-self-test.json"
+$selfTestProcess = Start-Process -FilePath $executablePath -ArgumentList @(
+  "--self-test", ('"{0}"' -f $reportPath)
+) -WindowStyle Hidden -PassThru -Wait
+if ($selfTestProcess.ExitCode -ne 0) {
+  throw "Packaged client self-test failed. See $reportPath"
+}
+$report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+if (-not $report.success) {
+  throw "Packaged client self-test failed: $($report.error)"
+}
+Write-Host "Verified packaged client: $($report.checks -join ', ')"

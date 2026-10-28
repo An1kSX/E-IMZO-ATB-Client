@@ -178,7 +178,7 @@ class WebSocketProxyServer:
             )
 
     async def _process_opening_handshake_request(self, path: str, request_headers: Any) -> Any:
-        origin = _safe_get_header(request_headers, "Origin")
+        origin = _normalize_identical_origin_headers(request_headers)
         websocket_key = _normalize_singleton_header(request_headers, "Sec-WebSocket-Key")
         requested_version = _normalize_singleton_header(request_headers, "Sec-WebSocket-Version")
         host = _safe_get_header(request_headers, "Host")
@@ -378,6 +378,20 @@ class WebSocketProxyServer:
             return ":".join(str(part) for part in remote_address if part is not None)
 
         return str(remote_address)
+
+
+def _normalize_identical_origin_headers(headers: Any) -> str | None:
+    values = _get_all_header_values(headers, "Origin")
+    # Older 1C components repeat Origin. Only identical values are unambiguous.
+    # Leave conflicting values intact so the WebSocket handshake rejects them.
+    if len(values) > 1 and all(value == values[0] for value in values):
+        _replace_header(headers, "Origin", values[0])
+        LOGGER.warning(
+            "Normalized duplicated Origin header values in opening handshake. count=%s origin=%s",
+            len(values),
+            values[0],
+        )
+    return _safe_get_header(headers, "Origin")
 
 
 def _normalize_singleton_header(headers: Any, name: str) -> str | None:

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import aiohttp
+from websockets.exceptions import InvalidStatusCode
 from websockets.legacy.client import connect
 from websockets.legacy.server import serve
 from websockets.datastructures import Headers
@@ -284,6 +285,75 @@ class OriginAccessTests(unittest.IsolatedAsyncioTestCase):
         await server._process_opening_handshake_request("/", headers)
         self.assertEqual(headers.get_all("Origin"), ["https://allowed.uz", "https://blocked.uz"])
         self.assertNotEqual(server._resolve_request_origin(SimpleNamespace(request_headers=headers)), "https://allowed.uz")
+
+    async def test_identical_origin_headers_are_collapsed_without_changing_value(self):
+        client, _, _, _ = self.make_client([])
+        server = WebSocketProxyServer(config=None, endpoint_proxy=client, server_cert_path=Path("unused"),
+            server_key_path=Path("unused"), certificate_rotation_event=asyncio.Event())
+        for origin in ("localhost", "https://didox.uz", "null"):
+            with self.subTest(origin=origin):
+                headers = Headers([("Origin", origin), ("origin", origin), ("ORIGIN", origin)])
+                await server._process_opening_handshake_request("/", headers)
+                self.assertEqual(headers.get_all("Origin"), [origin])
+                self.assertEqual(server._resolve_request_origin(SimpleNamespace(request_headers=headers)), origin)
+
+    async def test_identical_duplicate_origins_allow_real_handshake_and_reach_api_audit(self):
+        for origins in (("localhost", "localhost"), ("https://didox.uz", "https://didox.uz"),
+                        ("null", "null"), ("localhost",), ()):
+            with self.subTest(origins=origins):
+                client, session, _, _ = self.make_client([Response(payload={"success": True})])
+                server = WebSocketProxyServer(config=SimpleNamespace(matches_websocket_path=lambda path: path == "/"),
+                    endpoint_proxy=client, server_cert_path=Path("unused"), server_key_path=Path("unused"),
+                    certificate_rotation_event=asyncio.Event())
+                async with serve(server._handle_connection, "127.0.0.1", 0,
+                                 process_request=server._process_opening_handshake_request) as listener:
+                    port = listener.sockets[0].getsockname()[1]
+                    headers = [("Origin" if index % 2 == 0 else "origin", value)
+                               for index, value in enumerate(origins)]
+                    async with connect(f"ws://127.0.0.1:{port}/", extra_headers=headers) as websocket:
+                        await websocket.send('{"name":"version","id":123}')
+                        result = json.loads(await websocket.recv())
+                        self.assertTrue(result["success"])
+                        self.assertEqual(result["id"], 123)
+                self.assertEqual(len(session.calls), 1)
+                audit = json.loads(base64.b64decode(session.calls[0][2]["headers"]["X-ATB-Audit"]))
+                self.assertEqual(audit.get("origin"), origins[0] if origins else None)
+
+    async def test_conflicting_origins_fail_real_handshake_without_calling_api(self):
+        client, session, _, _ = self.make_client([])
+        server = WebSocketProxyServer(config=SimpleNamespace(matches_websocket_path=lambda path: path == "/"),
+            endpoint_proxy=client, server_cert_path=Path("unused"), server_key_path=Path("unused"),
+            certificate_rotation_event=asyncio.Event())
+        async with serve(server._handle_connection, "127.0.0.1", 0,
+                         process_request=server._process_opening_handshake_request) as listener:
+            port = listener.sockets[0].getsockname()[1]
+            with self.assertRaises(InvalidStatusCode) as error:
+                async with connect(f"ws://127.0.0.1:{port}/", extra_headers=[
+                    ("Origin", "https://allowed.uz"), ("origin", "https://blocked.uz"),
+                ]):
+                    self.fail("Conflicting Origin headers must not establish a connection")
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(session.calls, [])
+
+    async def test_1c_handshake_preserves_server_access_denial(self):
+        client, session, prompts, events = self.make_client([denied("ORIGIN_INVALID", "localhost")])
+        server = WebSocketProxyServer(config=SimpleNamespace(matches_websocket_path=lambda path: path == "/"),
+            endpoint_proxy=client, server_cert_path=Path("unused"), server_key_path=Path("unused"),
+            certificate_rotation_event=asyncio.Event())
+        async with serve(server._handle_connection, "127.0.0.1", 0,
+                         process_request=server._process_opening_handshake_request) as listener:
+            port = listener.sockets[0].getsockname()[1]
+            async with connect(f"ws://127.0.0.1:{port}/", extra_headers=[
+                ("Origin", "localhost"), ("origin", "localhost"),
+            ]) as websocket:
+                await websocket.send('{"plugin":"pfx","name":"load_key","arguments":[],"id":"1c"}')
+                result = json.loads(await websocket.recv())
+                self.assertEqual(result["code"], "ORIGIN_INVALID")
+                self.assertEqual(result["id"], "1c")
+        await self.settle_dialogs(client)
+        self.assertEqual(events, ["check_access"])
+        audit = json.loads(base64.b64decode(session.calls[0][2]["headers"]["X-ATB-Audit"]))
+        self.assertEqual(audit["origin"], "localhost")
 
     async def test_repeated_denials_finish_with_unique_ids_while_one_dialog_is_open(self):
         client, _, prompts, _ = self.make_client([denied() for _ in range(5)])

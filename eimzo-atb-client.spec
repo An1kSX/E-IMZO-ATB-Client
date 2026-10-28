@@ -1,9 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks.tcl_tk import tcltk_info
+
+# PyInstaller can silently exclude tkinter when Tcl initialization fails.
+# A client without its password dialogs must never be published.
+if not tcltk_info.available or tcltk_info.tcl_data_missing or tcltk_info.tk_data_missing:
+    raise RuntimeError(
+        'Cannot build E-IMZO client: tkinter/Tcl/Tk is unavailable. '
+        'Verify that tkinter.Tk() works in the build environment before rebuilding.'
+    )
 
 datas = []
 binaries = []
-hiddenimports = []
+hiddenimports = ['tkinter', 'tkinter.ttk', 'tkinter.simpledialog', 'tkinter.messagebox']
 tmp_ret = collect_all('aiohttp')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('websockets')
