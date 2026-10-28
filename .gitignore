@@ -11,6 +11,7 @@ tests/
 /tests/*
 !/tests/test_operation_audit.py
 !/tests/test_origin_access.py
+!/tests/test_certificate_filter.py
 *.egg-info/
 build/pyinstaller/
 src/client/_build_version.py
