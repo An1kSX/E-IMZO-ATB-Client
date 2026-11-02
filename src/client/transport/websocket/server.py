@@ -4,12 +4,16 @@ import asyncio
 from contextlib import AsyncExitStack
 import logging
 from pathlib import Path
+import time
+import traceback
 from typing import Any
+from uuid import uuid4
 
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import serve as legacy_websocket_serve
 
 from client.bootstrap.config import AppConfig
+from client.diagnostics import enrollment_guid, response_summary, trace_id
 from client.integrations.eimzo_api import EimzoApiClient, ProxyResponse
 from client.system.certificates import build_websocket_server_ssl_context
 from client.transport.websocket.messages import parse_proxy_command
@@ -301,30 +305,52 @@ class WebSocketProxyServer:
         remote_address: str | None,
     ) -> None:
         command = None
+        command_label = "unparsed"
+        started = time.perf_counter()
+        token = trace_id.set(uuid4().hex)
+        stage = "parse_command"
         try:
             command = parse_proxy_command(raw_message)
             command_label = _format_command_label(command.plugin, command.name)
             LOGGER.info(
-                "Received WebSocket command: command=%s has_arguments=%s origin=%s path=%s remote=%s",
+                "Received WebSocket command: command=%s has_arguments=%s origin=%s path=%s remote=%s trace_id=%s guid=%s",
                 command_label,
                 command.has_arguments,
                 origin,
                 request_path,
                 remote_address,
+                trace_id.get(),
+                enrollment_guid(command),
                 extra=_USER_ACTION_LOG_EXTRA,
             )
+            stage = "forward_to_api"
             response = await self._endpoint_proxy.forward(command, origin=origin)
+            stage = "send_response"
             await websocket.send(response.to_websocket_payload())
+            LOGGER.info(
+                "WebSocket response sent. command=%s trace_id=%s guid=%s elapsed_ms=%s result=%s",
+                command_label, trace_id.get(), enrollment_guid(command),
+                round((time.perf_counter() - started) * 1000),
+                response_summary(response.body, response.charset),
+                extra=_USER_ACTION_LOG_EXTRA,
+            )
+            stage = "close_connection"
             await websocket.close(
                 code=_CLOSE_CODE_NORMAL_CLOSURE,
                 reason=_REQUEST_COMPLETED_CLOSE_REASON,
             )
-        except Exception:
+        except Exception as error:
             LOGGER.error(
-                "Failed to process local WebSocket message: origin=%s path=%s remote=%s",
+                "Failed to process local WebSocket message: origin=%s path=%s remote=%s "
+                "command=%s trace_id=%s stage=%s error_type=%s elapsed_ms=%s frames=%s",
                 origin,
                 request_path,
                 remote_address,
+                command_label, trace_id.get(), stage, type(error).__name__,
+                round((time.perf_counter() - started) * 1000),
+                [(Path(f.filename).name, f.name, f.lineno)
+                 for f in traceback.extract_tb(error.__traceback__)[-6:]],
+                extra=_USER_ACTION_LOG_EXTRA,
             )
             payload = {"success": False, "message": "Не удалось выполнить операцию.", "code": "CLIENT_ERROR"}
             if command is not None and command.has_request_id:
@@ -334,6 +360,8 @@ class WebSocketProxyServer:
                 await websocket.close(code=_CLOSE_CODE_NORMAL_CLOSURE, reason=_REQUEST_COMPLETED_CLOSE_REASON)
             except ConnectionClosed:
                 pass
+        finally:
+            trace_id.reset(token)
 
     def _resolve_request_path(self, websocket: Any, path: str | None) -> str | None:
         if path is not None:

@@ -14,6 +14,7 @@ from typing import Any, Callable
 import aiohttp
 
 from client.domain.certificate_filter import filter_duplicate_certificate_keys
+from client.diagnostics import response_summary, trace_id
 from client.domain.commands import ProxyCommand
 from client.domain.key_identity_store import KeyIdentity, KeyIdentityStore
 from client.system.certificates import build_client_ssl_context
@@ -113,6 +114,7 @@ class HttpProxyResponse:
     status: int
     reason: str
     proxy_response: ProxyResponse
+    elapsed_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,7 +728,8 @@ class EimzoApiClient:
         if json_payload is not _MISSING:
             request_kwargs["json"] = json_payload
 
-        LOGGER.info("Forwarding %s %s", method, endpoint_url)
+        started = time.perf_counter()
+        LOGGER.info("Forwarding %s %s trace_id=%s", method, endpoint_url, trace_id.get())
         try:
             async with self._session.request(method, endpoint_url, **request_kwargs) as response:
                 body = await response.read()
@@ -740,6 +743,7 @@ class EimzoApiClient:
                 return HttpProxyResponse(
                     status=response.status,
                     reason=response.reason,
+                    elapsed_ms=round((time.perf_counter() - started) * 1000),
                     proxy_response=ProxyResponse(
                         body=body,
                         content_type=response.content_type,
@@ -747,6 +751,12 @@ class EimzoApiClient:
                     ),
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            LOGGER.warning(
+                "Remote API transport failed. trace_id=%s method=%s error_type=%s elapsed_ms=%s",
+                trace_id.get(), method, type(error).__name__,
+                round((time.perf_counter() - started) * 1000),
+                extra=_USER_ACTION_LOG_EXTRA,
+            )
             raise _UpstreamRequestError("Remote API request failed.") from error
 
     def _build_sensitive_confirmation_cooldown_key(
@@ -915,10 +925,16 @@ def _log_forwarded_api_response(
     command_label: str,
     response: HttpProxyResponse,
 ) -> None:
-    LOGGER.info(
-        "E-IMZO API server response. command=%s status=%s",
+    summary = response_summary(response.proxy_response.body, response.proxy_response.charset)
+    failed = response.status >= 400 or json.loads(summary).get("success") is False
+    log = LOGGER.warning if failed else LOGGER.info
+    log(
+        "E-IMZO API server response. command=%s status=%s trace_id=%s elapsed_ms=%s result=%s",
         command_label,
         response.status,
+        trace_id.get(),
+        response.elapsed_ms,
+        summary,
         extra=_USER_ACTION_LOG_EXTRA,
     )
 
